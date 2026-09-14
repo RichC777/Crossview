@@ -6,6 +6,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include "../shared/CrossViewShared.h"
+#include <evntrace.h>
+#include "etw-guids.h"
 
 static void PrintHelp(void)
 {
@@ -116,6 +118,168 @@ static HANDLE OpenDrv(void)
                        0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 }
 
+
+/*
+ * T15.b — Probe the published FudModule v3.1 94-GUID ETW kill-list (detection-only).
+ * Starts a private real-time session, EnableTraceEx2 each GUID, then disables and
+ * stops the session. Does not permanently alter provider state or attack ETW.
+ */
+static int GuidEq(const GUID *a, const GUID *b)
+{
+    return IsEqualGUID(a, b);
+}
+
+static void UsermodeEtwProbe(CV_SCAN_RESULT *r)
+{
+    ULONG i;
+    ULONG enableOk = 0, enableFail = 0, notFound = 0;
+    ULONG tiStatus = (ULONG)-1, kpStatus = (ULONG)-1, saStatus = (ULONG)-1;
+    ULONG startStatus, stopStatus;
+    TRACEHANDLE hSession = (TRACEHANDLE)0;
+    EVENT_TRACE_PROPERTIES *props = NULL;
+    ULONG propsSize;
+    wchar_t sessionName[] = L"CrossViewEtwT15b";
+    CV_FINDING *f;
+    const char *tiLabel, *sevTitle;
+    ULONG sev;
+
+    if (r->FindingCount >= CV_MAX_FINDINGS) return;
+
+    propsSize = (ULONG)(sizeof(EVENT_TRACE_PROPERTIES) + sizeof(sessionName) + 32);
+    props = (EVENT_TRACE_PROPERTIES *)calloc(1, propsSize);
+    if (!props) return;
+
+    props->Wnode.BufferSize = propsSize;
+    props->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+    props->Wnode.ClientContext = 1;
+    props->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
+    props->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
+    props->LogFileNameOffset = 0;
+    memcpy((char *)props + props->LoggerNameOffset, sessionName, sizeof(sessionName));
+
+    startStatus = StartTraceW(&hSession, sessionName, props);
+    if (startStatus == ERROR_ALREADY_EXISTS) {
+        /* Orphaned probe session — stop then retry once. */
+        ControlTraceW((TRACEHANDLE)0, sessionName, props, EVENT_TRACE_CONTROL_STOP);
+        memset(props, 0, propsSize);
+        props->Wnode.BufferSize = propsSize;
+        props->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+        props->Wnode.ClientContext = 1;
+        props->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
+        props->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
+        memcpy((char *)props + props->LoggerNameOffset, sessionName, sizeof(sessionName));
+        startStatus = StartTraceW(&hSession, sessionName, props);
+    }
+
+    if (startStatus != ERROR_SUCCESS) {
+        f = &r->Findings[r->FindingCount++];
+        memset(f, 0, sizeof(*f));
+        f->Severity = CvSevInfo;
+        strncpy(f->Module, "etw", CV_MODULE_LEN - 1);
+        strncpy(f->Technique, "T15.b", 15);
+        strncpy(f->Title, "ETW kill-list probe could not start session", CV_TITLE_LEN - 1);
+        _snprintf(f->Detail, CV_DETAIL_LEN - 1,
+                  "StartTraceW(CrossViewEtwT15b) returned %lu. Need SeSystemProfilePrivilege / admin for a private real-time session.",
+                  startStatus);
+        _snprintf(f->Evidence, CV_EVIDENCE_LEN - 1, "StartTrace=%lu kill=%u", startStatus, CV_ETW_KILL_COUNT);
+        free(props);
+        return;
+    }
+
+    for (i = 0; i < CV_ETW_KILL_COUNT; i++) {
+        ULONG st = EnableTraceEx2(hSession, &kCvEtwKillList[i],
+                                  EVENT_CONTROL_CODE_ENABLE_PROVIDER,
+                                  TRACE_LEVEL_VERBOSE, 0, 0, 0, NULL);
+        if (GuidEq(&kCvEtwKillList[i], &kCvEtwThreatIntel)) tiStatus = st;
+        if (GuidEq(&kCvEtwKillList[i], &kCvEtwKernelProcess)) kpStatus = st;
+        if (GuidEq(&kCvEtwKillList[i], &kCvEtwSecAuditing)) saStatus = st;
+
+        if (st == ERROR_SUCCESS) {
+            enableOk++;
+            EnableTraceEx2(hSession, &kCvEtwKillList[i],
+                           EVENT_CONTROL_CODE_DISABLE_PROVIDER,
+                           0, 0, 0, 0, NULL);
+        } else if (st == ERROR_WMI_GUID_NOT_FOUND) {
+            notFound++;
+        } else {
+            enableFail++;
+        }
+    }
+
+    stopStatus = ControlTraceW(hSession, sessionName, props, EVENT_TRACE_CONTROL_STOP);
+    free(props);
+
+    /* Classify results. TI EnableTrace often returns ERROR_ACCESS_DENIED (5) for
+     * non-PPL consumers on clean hosts — that alone is NOT FudModule. */
+    if (kpStatus == ERROR_SUCCESS &&
+        tiStatus != ERROR_SUCCESS && tiStatus != (ULONG)-1 &&
+        tiStatus != ERROR_ACCESS_DENIED &&
+        tiStatus != ERROR_WMI_GUID_NOT_FOUND) {
+        sev = CvSevHigh;
+        sevTitle = "Threat-Intelligence provider enable failed on live host";
+    } else if (kpStatus == ERROR_SUCCESS && tiStatus == ERROR_WMI_GUID_NOT_FOUND) {
+        sev = CvSevHigh;
+        sevTitle = "Threat-Intelligence provider missing on live host";
+    } else if (enableFail > 8 && enableOk < 40) {
+        sev = CvSevMedium;
+        sevTitle = "FudModule kill-list shows widespread EnableTrace gaps";
+    } else if (enableOk > 0) {
+        sev = CvSevClean;
+        sevTitle = "FudModule 94-GUID ETW kill-list probe completed";
+    } else {
+        sev = CvSevInfo;
+        sevTitle = "FudModule 94-GUID ETW kill-list: no providers enableable";
+    }
+
+    if (tiStatus == ERROR_SUCCESS) tiLabel = "ti=ok";
+    else if (tiStatus == ERROR_WMI_GUID_NOT_FOUND) tiLabel = "ti=absent";
+    else if (tiStatus == ERROR_ACCESS_DENIED) tiLabel = "ti=denied";
+    else if (tiStatus == (ULONG)-1) tiLabel = "ti=?";
+    else tiLabel = "ti=FAIL";
+
+    f = &r->Findings[r->FindingCount++];
+    memset(f, 0, sizeof(*f));
+    f->Severity = sev;
+    strncpy(f->Module, "etw", CV_MODULE_LEN - 1);
+    strncpy(f->Technique, "T15.b", 15);
+    strncpy(f->Title, sevTitle, CV_TITLE_LEN - 1);
+    _snprintf(f->Detail, CV_DETAIL_LEN - 1,
+              "Probed %u GenDigital/Avast FudModule kill-list GUIDs via EnableTraceEx2 on a private session. "
+              "enable_ok=%lu fail=%lu not_found=%lu. TI=%lu KernelProcess=%lu SecAuditing=%lu stop=%lu. Detection-only.",
+              CV_ETW_KILL_COUNT, enableOk, enableFail, notFound,
+              tiStatus, kpStatus, saStatus, stopStatus);
+    _snprintf(f->Evidence, CV_EVIDENCE_LEN - 1,
+              "kill94 ok=%lu fail=%lu nf=%lu %s kp=%lu sa=%lu",
+              enableOk, enableFail, notFound, tiLabel, kpStatus, saStatus);
+
+    if (tiStatus == ERROR_ACCESS_DENIED && r->FindingCount < CV_MAX_FINDINGS) {
+        f = &r->Findings[r->FindingCount++];
+        memset(f, 0, sizeof(*f));
+        f->Severity = CvSevInfo;
+        strncpy(f->Module, "etw", CV_MODULE_LEN - 1);
+        strncpy(f->Technique, "T15.b", 15);
+        strncpy(f->Title, "Threat-Intelligence EnableTrace Access Denied", CV_TITLE_LEN - 1);
+        strncpy(f->Detail,
+                "Microsoft-Windows-Threat-Intelligence returned ERROR_ACCESS_DENIED. "
+                "Common for non-PPL consumers; not alone a FudModule 0x80 hit. Cross-check with kernel EnableMask if elevated telemetry is required.",
+                CV_DETAIL_LEN - 1);
+        _snprintf(f->Evidence, CV_EVIDENCE_LEN - 1, "TI={f4e1897c...} st=%lu (denied)", tiStatus);
+    }
+
+    if (sev == CvSevHigh && r->FindingCount < CV_MAX_FINDINGS) {
+        f = &r->Findings[r->FindingCount++];
+        memset(f, 0, sizeof(*f));
+        f->Severity = CvSevHigh;
+        strncpy(f->Module, "etw", CV_MODULE_LEN - 1);
+        strncpy(f->Technique, "T15.b", 15);
+        strncpy(f->Title, "Silent Threat-Intelligence provider (FudModule T15.b)", CV_TITLE_LEN - 1);
+        _snprintf(f->Detail, CV_DETAIL_LEN - 1,
+                  "Microsoft-Windows-Threat-Intelligence EnableTraceEx2 returned %lu while Kernel-Process returned %lu. "
+                  "Possible FudModule 0x80 GUID-entry disablement signal.",
+                  tiStatus, kpStatus);
+        _snprintf(f->Evidence, CV_EVIDENCE_LEN - 1, "TI={f4e1897c...} st=%lu", tiStatus);
+    }
+}
 static void UsermodeIntegrity(CV_SCAN_RESULT *r)
 {
     DWORD hv = 0, sz;
@@ -212,6 +376,8 @@ int main(int argc, char **argv)
     }
 
     UsermodeIntegrity(&result);
+    if (profile & CV_MOD_ETW)
+        UsermodeEtwProbe(&result);
 
     if (outPath) {
         out = fopen(outPath, "w");
