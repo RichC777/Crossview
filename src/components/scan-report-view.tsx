@@ -19,8 +19,7 @@ export function ScanReportView({ report }: { report: ScanReport }) {
 
   const counts = countBySeverity(report.findings);
   const modules = modulesOf(report.findings);
-  const activeModule = module !== null && modules.includes(module) ? module : null;
-  const shown = filterFindings(report.findings, severities, activeModule);
+  const shown = filterFindings(report.findings, severities, module);
 
   function toggleSeverity(s: Severity) {
     const next = new Set(severities);
@@ -66,7 +65,7 @@ export function ScanReportView({ report }: { report: ScanReport }) {
           <label className="ml-auto flex items-center gap-2 text-xs text-muted">
             module
             <select
-              value={activeModule ?? ""}
+              value={module ?? ""}
               onChange={(e) => setModule(e.target.value || null)}
               className="rounded-sm border border-line bg-bg px-2 py-1 font-mono text-xs text-fg"
             >
