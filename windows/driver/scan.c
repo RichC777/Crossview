@@ -1014,12 +1014,399 @@ static void CvScanFilter(CV_SCAN_RESULT *R)
     }
 }
 
+
+/*
+ * T12.i — bugcheck / dump-path callback detection (FudModule forensic-cleanup class).
+ *
+ * Resolve KeBugCheck*CallbackListHead via rip-relative LEAs from the exported
+ * KeRegisterBugCheckCallback / KeRegisterBugCheckReasonCallback (same version-safe
+ * style as T11.a). Walk LIST_ENTRY chains read-only; never call KeRegister* —
+ * a registered callback that survives unload is disruptive.
+ *
+ * Cross-view: CallbackRoutine outside every PsLoadedModules image => orphan
+ * dump-path callback (FudModule 3.1 forensic cleanup).
+ */
+#define CV_BC_MAX_WALK      256
+#define CV_BC_MAX_LEA       8
+#define CV_BC_MAX_MODS      512
+#define CV_BC_FN_OFF        0x10  /* CallbackRoutine on both record layouts */
+
+static ULONG CvCollectLeaRipTargets(const UCHAR *p, ULONG MaxScan, PVOID *Out, ULONG MaxOut)
+{
+    ULONG i;
+    ULONG n = 0;
+
+    if (!p || !Out || !MaxOut || !MmIsAddressValid((PVOID)p)) {
+        return 0;
+    }
+    for (i = 0; i + 7 <= MaxScan && n < MaxOut; i++) {
+        UCHAR modrm;
+        LONG imm;
+        PVOID tgt;
+        ULONG j;
+        BOOLEAN dup;
+
+        if (!MmIsAddressValid((PVOID)(p + i + 6))) {
+            break;
+        }
+        if ((p[i] != 0x48 && p[i] != 0x4C) || p[i + 1] != 0x8D) {
+            continue;
+        }
+        modrm = p[i + 2];
+        if ((modrm & 0xC7) != 0x05) {
+            continue;
+        }
+        imm = *(LONG *)(p + i + 3);
+        tgt = (PVOID)(p + i + 7 + imm);
+        if (!tgt || !MmIsAddressValid(tgt)) {
+            continue;
+        }
+        dup = FALSE;
+        for (j = 0; j < n; j++) {
+            if (Out[j] == tgt) {
+                dup = TRUE;
+                break;
+            }
+        }
+        if (!dup) {
+            Out[n++] = tgt;
+        }
+    }
+    return n;
+}
+
+static BOOLEAN CvLooksLikeListHead(PVOID Cand)
+{
+    LIST_ENTRY head;
+    LIST_ENTRY *fl;
+    LIST_ENTRY *bl;
+    LIST_ENTRY *ent;
+    ULONG n;
+
+    if (!Cand || !MmIsAddressValid(Cand)) {
+        return FALSE;
+    }
+    if (!MmIsAddressValid((PUCHAR)Cand + sizeof(LIST_ENTRY) - 1)) {
+        return FALSE;
+    }
+    __try {
+        head = *(LIST_ENTRY *)Cand;
+        fl = head.Flink;
+        bl = head.Blink;
+        if (!fl || !bl) {
+            return FALSE;
+        }
+        /* Empty list: Flink == Blink == &head */
+        if (fl == (LIST_ENTRY *)Cand && bl == (LIST_ENTRY *)Cand) {
+            return TRUE;
+        }
+        if ((ULONG_PTR)fl < 0xFFFF800000000000ULL ||
+            (ULONG_PTR)bl < 0xFFFF800000000000ULL) {
+            return FALSE;
+        }
+        if (!MmIsAddressValid(fl) || !MmIsAddressValid(bl)) {
+            return FALSE;
+        }
+        /* Well-formed circular list: first->Blink == head, last->Flink == head */
+        if (fl->Blink != (LIST_ENTRY *)Cand) {
+            return FALSE;
+        }
+        if (bl->Flink != (LIST_ENTRY *)Cand) {
+            return FALSE;
+        }
+        /*
+         * Walk must return to head within a sane bound. Reject long chains that
+         * only satisfy the first/last backlink check (false LEA targets).
+         */
+        n = 0;
+        for (ent = fl; ent != (LIST_ENTRY *)Cand && n < 64; ent = ent->Flink, n++) {
+            PVOID fn;
+            if (!ent || !MmIsAddressValid(ent)) {
+                return FALSE;
+            }
+            if ((ULONG_PTR)ent < 0xFFFF800000000000ULL) {
+                return FALSE;
+            }
+            if (!MmIsAddressValid((PUCHAR)ent + CV_BC_FN_OFF + sizeof(PVOID) - 1)) {
+                return FALSE;
+            }
+            fn = *(PVOID *)((PUCHAR)ent + CV_BC_FN_OFF);
+            if (!fn || (ULONG_PTR)fn < 0xFFFF800000000000ULL) {
+                return FALSE;
+            }
+        }
+        if (ent != (LIST_ENTRY *)Cand) {
+            return FALSE;
+        }
+        return TRUE;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return FALSE;
+    }
+}
+
+static PVOID CvResolveBugcheckListHead(const WCHAR *ExportName)
+{
+    const UCHAR *exp;
+    PVOID leas[CV_BC_MAX_LEA];
+    ULONG n;
+    ULONG i;
+
+    exp = (const UCHAR *)CvGetExportA(ExportName);
+    if (!exp) {
+        return NULL;
+    }
+    RtlZeroMemory(leas, sizeof(leas));
+    n = CvCollectLeaRipTargets(exp, 0x180, leas, CV_BC_MAX_LEA);
+    for (i = 0; i < n; i++) {
+        if (CvLooksLikeListHead(leas[i])) {
+            return leas[i];
+        }
+    }
+    return NULL;
+}
+
+static ULONG CvSnapshotAllMods(CV_MOD_RANGE *Out, ULONG MaxOut)
+{
+    CV_SYS_MODULE_INFO *info = NULL;
+    ULONG size = 0;
+    ULONG n = 0;
+    ULONG i;
+    NTSTATUS st;
+
+    if (!Out || !MaxOut) {
+        return 0;
+    }
+    st = ZwQuerySystemInformation(CV_SystemModuleInformation, NULL, 0, &size);
+    if (size == 0) {
+        return 0;
+    }
+    size += 0x1000;
+    info = (CV_SYS_MODULE_INFO *)ExAllocatePool2(POOL_FLAG_NON_PAGED, size, 'iCxC');
+    if (!info) {
+        return 0;
+    }
+    st = ZwQuerySystemInformation(CV_SystemModuleInformation, info, size, &size);
+    if (!NT_SUCCESS(st)) {
+        ExFreePool(info);
+        return 0;
+    }
+    for (i = 0; i < info->NumberOfModules && n < MaxOut; i++) {
+        const CHAR *path = (const CHAR *)info->Modules[i].FullPathName;
+        const CHAR *baseName = path;
+        SIZE_T k;
+
+        Out[n].Base = info->Modules[i].ImageBase;
+        Out[n].Size = info->Modules[i].ImageSize;
+        for (k = 0; path[k]; k++) {
+            if (path[k] == '\\' || path[k] == '/') {
+                baseName = path + k + 1;
+            }
+        }
+        RtlStringCbCopyA(Out[n].Name, sizeof(Out[n].Name), baseName);
+        n++;
+    }
+    ExFreePool(info);
+    return n;
+}
+
+/*
+ * Walk a KBUGCHECK_*_CALLBACK_RECORD list. CallbackRoutine is at +0x10 on both
+ * classic and reason layouts. State==0 (BufferEmpty) => skip.
+ */
+static BOOLEAN CvWalkBugcheckList(
+    LIST_ENTRY *Head,
+    const CV_MOD_RANGE *Mods,
+    ULONG ModCount,
+    ULONG *OutCount,
+    ULONG *OutOrphans,
+    ULONG *OutDumpish)
+{
+    LIST_ENTRY *ent;
+    ULONG guard = 0;
+    ULONG localCount = 0;
+    ULONG localOrphans = 0;
+    ULONG localDumpish = 0;
+
+    if (!Head || !OutCount || !OutOrphans) {
+        return FALSE;
+    }
+    __try {
+        for (ent = Head->Flink; ent != Head && guard < CV_BC_MAX_WALK; ent = ent->Flink, guard++) {
+            PUCHAR rec;
+            PVOID fn;
+
+            if (!ent || !MmIsAddressValid(ent)) {
+                return FALSE;
+            }
+            rec = (PUCHAR)ent; /* Entry is at offset 0 */
+            if (!MmIsAddressValid(rec + CV_BC_FN_OFF + sizeof(PVOID) - 1)) {
+                return FALSE;
+            }
+            fn = *(PVOID *)(rec + CV_BC_FN_OFF);
+            if (!fn || (ULONG_PTR)fn < 0xFFFF800000000000ULL) {
+                return FALSE;
+            }
+            /* List membership implies registered (KeRegister sets State before insert). */
+
+            localCount++;
+            if (Mods && ModCount > 0 && !CvFnInRanges(fn, Mods, ModCount, NULL, 0)) {
+                localOrphans++;
+            }
+            if (OutDumpish && MmIsAddressValid(rec + 0x28 + sizeof(ULONG) - 1)) {
+                ULONG reason = *(ULONG *)(rec + 0x28);
+                /* SecondaryDumpData=2, DumpIo=3, TriageDumpData=7 */
+                if (reason == 2 || reason == 3 || reason == 7) {
+                    localDumpish++;
+                }
+            }
+        }
+        if (ent != Head) {
+            /* Hit guard without returning — not a callback list. */
+            return FALSE;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return FALSE;
+    }
+    *OutCount += localCount;
+    *OutOrphans += localOrphans;
+    if (OutDumpish) {
+        *OutDumpish += localDumpish;
+    }
+    return TRUE;
+}
+
 static void CvScanBugcheck(CV_SCAN_RESULT *R)
 {
-    CvAdd(R, CvSevInfo, "bugcheck", "T12.i",
-          "BugCheckReasonCallback list not walked in this build",
-          "KeRegisterBugCheckReasonCallback entries are undocumented. Check for a dump-path callback whose ComponentRoutine is not in any LDR entry â€” FudModule 3.1's forensic-cleanup step.",
-          "crashdmp.sys still loaded is not sufficient");
+    LIST_ENTRY *classicHead = NULL;
+    LIST_ENTRY *reasonHead = NULL;
+    LIST_ENTRY *reasonHead2 = NULL;
+    PVOID leas[CV_BC_MAX_LEA];
+    ULONG nLea = 0;
+    ULONG i;
+    CV_MOD_RANGE *mods = NULL;
+    ULONG modCount = 0;
+    ULONG classic = 0;
+    ULONG reason = 0;
+    ULONG orphans = 0;
+    ULONG dumpish = 0;
+    ULONG heads = 0;
+    CHAR ev[CV_EVIDENCE_LEN];
+    BOOLEAN crashdmp = FALSE;
+
+    RtlZeroMemory(leas, sizeof(leas));
+
+    mods = (CV_MOD_RANGE *)ExAllocatePool2(POOL_FLAG_NON_PAGED,
+                                           sizeof(CV_MOD_RANGE) * CV_BC_MAX_MODS,
+                                           'iCxC');
+    if (mods) {
+        modCount = CvSnapshotAllMods(mods, CV_BC_MAX_MODS);
+        for (i = 0; i < modCount; i++) {
+            if (CvNameTailMatchA(mods[i].Name, "crashdmp.sys")) {
+                crashdmp = TRUE;
+                break;
+            }
+        }
+    }
+
+    __try {
+        classicHead = (LIST_ENTRY *)CvResolveBugcheckListHead(L"KeRegisterBugCheckCallback");
+        reasonHead = (LIST_ENTRY *)CvResolveBugcheckListHead(L"KeRegisterBugCheckReasonCallback");
+
+        /* Reason register may LEA a second list (AddPages/RemovePages). */
+        {
+            const UCHAR *exp = (const UCHAR *)CvGetExportA(L"KeRegisterBugCheckReasonCallback");
+            if (exp) {
+                nLea = CvCollectLeaRipTargets(exp, 0x180, leas, CV_BC_MAX_LEA);
+                for (i = 0; i < nLea; i++) {
+                    if (!CvLooksLikeListHead(leas[i])) {
+                        continue;
+                    }
+                    if (leas[i] == (PVOID)reasonHead || leas[i] == (PVOID)classicHead) {
+                        continue;
+                    }
+                    reasonHead2 = (LIST_ENTRY *)leas[i];
+                    break;
+                }
+            }
+        }
+
+        if (classicHead &&
+            CvWalkBugcheckList(classicHead, mods, modCount, &classic, &orphans, NULL)) {
+            heads++;
+        }
+        if (reasonHead &&
+            CvWalkBugcheckList(reasonHead, mods, modCount, &reason, &orphans, &dumpish)) {
+            heads++;
+        }
+        if (reasonHead2 &&
+            CvWalkBugcheckList(reasonHead2, mods, modCount, &reason, &orphans, &dumpish)) {
+            heads++;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (mods) {
+            ExFreePool(mods);
+        }
+        CvAdd(R, CvSevMedium, "bugcheck", "T12.i",
+              "Exception walking bugcheck callback lists",
+              "SEH during export-LEA decode or LIST_ENTRY walk. Refusing to guess on this build.",
+              "EXCEPTION in CvScanBugcheck");
+        return;
+    }
+
+    if (mods) {
+        ExFreePool(mods);
+        mods = NULL;
+    }
+
+    RtlStringCbPrintfA(ev, sizeof(ev),
+                       "classic=%lu reason=%lu orphans=%lu dumpReason=%lu heads=%lu crashdmp=%s mods=%lu",
+                       classic, reason, orphans, dumpish, heads,
+                       crashdmp ? "mapped" : "absent",
+                       modCount);
+
+    if (modCount == 0) {
+        CvAdd(R, CvSevMedium, "bugcheck", "T12.i",
+              "Module snapshot unavailable for bugcheck cross-view",
+              "Bugcheck list heads may have been resolved but PsLoadedModules snapshot failed; orphan CallbackRoutine detection skipped.",
+              ev);
+    }
+
+    if (heads == 0) {
+        CvAdd(R, CvSevMedium, "bugcheck", "T12.i",
+              "Bugcheck callback list heads not resolved",
+              "Export-LEA decode found no LIST_ENTRY head from KeRegisterBugCheckCallback / KeRegisterBugCheckReasonCallback. No PDB fallback in this build.",
+              "KeRegisterBugCheck* LEA miss");
+        return;
+    }
+
+    if (orphans > 0) {
+        CvAdd(R, CvSevHigh, "bugcheck", "T12.i",
+              "Bugcheck callback routine outside loaded modules",
+              "At least one KeRegisterBugCheck* CallbackRoutine is not in any PsLoadedModules image. Classic FudModule-class dump-path / forensic-cleanup residue (T12.i).",
+              ev);
+        return;
+    }
+
+    CvAdd(R, CvSevClean, "bugcheck", "T12.i",
+          "Bugcheck callback lists walked",
+          "Export-LEA resolved KeBugCheck* list heads; every CallbackRoutine landed in a loaded module. Detection-only — no callbacks registered.",
+          ev);
+
+    if (crashdmp && (classic + reason) == 0) {
+        CHAR ev2[CV_EVIDENCE_LEN];
+        RtlStringCbPrintfA(ev2, sizeof(ev2), "crashdmp.sys mapped; classic+reason callbacks=0");
+        CvAdd(R, CvSevInfo, "bugcheck", "T12.i",
+              "crashdmp.sys mapped but no bugcheck callbacks visible",
+              "crashdmp.sys still loaded is not sufficient by itself; empty callback lists with crashdmp present can indicate teardown. Cross-check dump settings from user-mode.",
+              ev2);
+    } else if (dumpish > 0) {
+        CHAR ev2[CV_EVIDENCE_LEN];
+        RtlStringCbPrintfA(ev2, sizeof(ev2), "dump-reason callbacks=%lu", dumpish);
+        CvAdd(R, CvSevInfo, "bugcheck", "T12.i",
+              "Dump-path reason callbacks present",
+              "SecondaryDumpData / DumpIo / TriageDumpData reason callbacks are registered. Routines resolved into loaded modules on this pass.",
+              ev2);
+    }
 }
 
 static void CvScanIntegrity(CV_SCAN_RESULT *R)
