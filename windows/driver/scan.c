@@ -1045,12 +1045,15 @@ static void CvScanIntegrity(CV_SCAN_RESULT *R)
     }
 }
 
+/*
+ * T12.b — WFP callout/filter/provider enumeration.
+ * BFE Fwpm*Enum0 lives in usermode (cli/cvscan.c UsermodeWfpProbe). Detection-only;
+ * never adds filters that could isolate the host. Kernel classifyFn outside
+ * owning module remains T19.a / FudModule Kaspersky WFP stage.
+ */
 static void CvScanNetwork(CV_SCAN_RESULT *R)
 {
-    CvAdd(R, CvSevInfo, "network", "T12.b",
-          "WFP callout table not enumerated here",
-          "A later drop can call FwpmCalloutEnum0 from usermode (BFE). Kernel classifyFn pointers outside the owning module are T19.a / FudModule's Kaspersky WFP stage.",
-          "netsh wfp show filters");
+    (void)R;
 }
 
 static void CvScanObject(CV_SCAN_RESULT *R)

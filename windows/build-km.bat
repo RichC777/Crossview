@@ -15,7 +15,7 @@ if errorlevel 1 exit /b 1
 link /nologo /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry /NODEFAULTLIB /OUT:"%OUT%\crossview.sys" /PDB:"%OUT%\crossview.pdb" /DEBUG "%OUT%\obj\driver.obj" "%OUT%\obj\scan.obj" "%OUT%\obj\offsets.obj" ntoskrnl.lib hal.lib BufferOverflowK.lib libcntpr.lib ntstrsafe.lib fltMgr.lib
 if errorlevel 1 exit /b 1
 echo [2/3] cvscan.exe
-cl /nologo /W3 /O2 /Zi /DUNICODE /D_UNICODE /Fe"%OUT%\cvscan.exe" /Fo"%OUT%\obj\cvscan.obj" /Fd"%OUT%\obj\cvscan.pdb" cli\cvscan.c advapi32.lib version.lib
+cl /nologo /W3 /O2 /Zi /DUNICODE /D_UNICODE /Fe"%OUT%\cvscan.exe" /Fo"%OUT%\obj\cvscan.obj" /Fd"%OUT%\obj\cvscan.pdb" cli\cvscan.c advapi32.lib version.lib fwpuclnt.lib rpcrt4.lib
 if errorlevel 1 exit /b 1
 echo [3/3] CrossView.exe
 cl /nologo /W3 /O2 /Zi /DUNICODE /D_UNICODE /Fe"%OUT%\CrossView.exe" /Fo"%OUT%\obj\gui.obj" /Fd"%OUT%\obj\gui.pdb" gui\main.c comctl32.lib user32.lib gdi32.lib dwmapi.lib
