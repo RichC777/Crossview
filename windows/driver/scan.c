@@ -683,12 +683,333 @@ static void CvScanEtw(CV_SCAN_RESULT *R)
           "94-GUID list in etw-guids / cvscan --fudmodule");
 }
 
+/*
+ * T12.e — minifilter cross-view via Filter Manager (fltmc-style).
+ *
+ * WDM software driver: call FltEnumerateFilterInformation without registering
+ * as a minifilter. Read-only. Win11 26200-safe (PASSIVE_LEVEL / APC_LEVEL max).
+ *
+ * FudModule-class signal: WdFilter.sys mapped in PsLoadedModules but absent
+ * from FltMgr (or AV altitude 328010 missing) means the minifilter was torn
+ * down while the image remained.
+ */
+#define CV_FLT_INFO_CLASS_AGG_STD   2u
+#define CV_FLTFL_ASI_IS_MINIFILTER  0x00000001u
+#define CV_FLT_ENUM_MAX             256u
+#define CV_FLT_INFO_CB              768u
+#define CV_WD_FILTER_ALTITUDE       "328010"
+
+typedef struct _CV_FILTER_AGGREGATE_STANDARD_INFORMATION {
+    ULONG NextEntryOffset;
+    ULONG Flags;
+    union {
+        struct {
+            ULONG Flags;
+            ULONG FrameID;
+            ULONG NumberOfInstances;
+            USHORT FilterNameLength;
+            USHORT FilterNameBufferOffset;
+            USHORT FilterAltitudeLength;
+            USHORT FilterAltitudeBufferOffset;
+        } MiniFilter;
+        struct {
+            ULONG Flags;
+            USHORT FilterNameLength;
+            USHORT FilterNameBufferOffset;
+            USHORT FilterAltitudeLength;
+            USHORT FilterAltitudeBufferOffset;
+        } LegacyFilter;
+    } Type;
+} CV_FILTER_AGGREGATE_STANDARD_INFORMATION;
+
+NTSTATUS NTAPI FltEnumerateFilterInformation(
+    ULONG Index,
+    ULONG InformationClass,
+    PVOID Buffer,
+    ULONG BufferSize,
+    PULONG BytesReturned
+);
+
+static BOOLEAN CvWideEqualsAsciiI(const WCHAR *W, USHORT ByteLen, const CHAR *A)
+{
+    USHORT n;
+    USHORT i;
+    if (!W || !A) {
+        return FALSE;
+    }
+    n = (USHORT)(ByteLen / sizeof(WCHAR));
+    for (i = 0; ; i++) {
+        CHAR ac = A[i];
+        WCHAR wc;
+        CHAR wcl;
+        if (ac == 0) {
+            return (BOOLEAN)(i == n);
+        }
+        if (i >= n) {
+            return FALSE;
+        }
+        wc = W[i];
+        if (wc > 0x7f) {
+            return FALSE;
+        }
+        wcl = (CHAR)wc;
+        if (wcl >= 'A' && wcl <= 'Z') {
+            wcl = (CHAR)(wcl - 'A' + 'a');
+        }
+        if (ac >= 'A' && ac <= 'Z') {
+            ac = (CHAR)(ac - 'A' + 'a');
+        }
+        if (wcl != ac) {
+            return FALSE;
+        }
+    }
+}
+
+static BOOLEAN CvWideContainsAsciiI(const WCHAR *W, USHORT ByteLen, const CHAR *A)
+{
+    USHORT n;
+    USHORT al;
+    USHORT i;
+    USHORT j;
+    if (!W || !A || !A[0]) {
+        return FALSE;
+    }
+    n = (USHORT)(ByteLen / sizeof(WCHAR));
+    al = 0;
+    while (A[al]) {
+        al++;
+    }
+    if (al == 0 || n < al) {
+        return FALSE;
+    }
+    for (i = 0; i + al <= n; i++) {
+        for (j = 0; j < al; j++) {
+            WCHAR wc = W[i + j];
+            CHAR ac = A[j];
+            CHAR wcl;
+            if (wc > 0x7f) {
+                break;
+            }
+            wcl = (CHAR)wc;
+            if (wcl >= 'A' && wcl <= 'Z') {
+                wcl = (CHAR)(wcl - 'A' + 'a');
+            }
+            if (ac >= 'A' && ac <= 'Z') {
+                ac = (CHAR)(ac - 'A' + 'a');
+            }
+            if (wcl != ac) {
+                break;
+            }
+        }
+        if (j == al) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static void CvCopyWideToAnsi(
+    const WCHAR *W,
+    USHORT ByteLen,
+    CHAR *Out,
+    SIZE_T OutLen)
+{
+    USHORT n;
+    USHORT i;
+    if (!Out || OutLen == 0) {
+        return;
+    }
+    Out[0] = 0;
+    if (!W) {
+        return;
+    }
+    n = (USHORT)(ByteLen / sizeof(WCHAR));
+    if ((SIZE_T)n >= OutLen) {
+        n = (USHORT)(OutLen - 1);
+    }
+    for (i = 0; i < n; i++) {
+        WCHAR wc = W[i];
+        Out[i] = (wc <= 0x7f) ? (CHAR)wc : '?';
+    }
+    Out[n] = 0;
+}
+
+static BOOLEAN CvIsWdFilterImageMapped(void)
+{
+    CV_MOD_RANGE mods[4];
+    BOOLEAN wd = FALSE;
+    RtlZeroMemory(mods, sizeof(mods));
+    (void)CvSnapshotSecurityMods(mods, 4, &wd);
+    return wd;
+}
+
 static void CvScanFilter(CV_SCAN_RESULT *R)
 {
-    CvAdd(R, CvSevInfo, "filter", "T12.e",
-          "Minifilter enumeration from FltMgr",
-          "Link against fltmgr.lib and call FltEnumerateFilters in a later drop. For now, compare fltmc filters in usermode against altitude keys under HKLM\\SYSTEM\\CurrentControlSet\\Services. Mapped WdFilter + missing 328010 altitude is T12.e.",
-          "fltmc filters");
+    ULONG idx;
+    ULONG mini = 0;
+    ULONG legacy = 0;
+    ULONG total = 0;
+    ULONG wdRegistered = 0;
+    ULONG alt328010 = 0;
+    BOOLEAN wdMapped;
+    BOOLEAN enumOk = FALSE;
+    BOOLEAN firstFail = FALSE;
+    NTSTATUS firstSt = STATUS_SUCCESS;
+    CHAR sample[96];
+    CHAR ev[CV_EVIDENCE_LEN];
+    UCHAR buf[CV_FLT_INFO_CB];
+
+    sample[0] = 0;
+    wdMapped = CvIsWdFilterImageMapped();
+
+    __try {
+        for (idx = 0; idx < CV_FLT_ENUM_MAX; idx++) {
+            CV_FILTER_AGGREGATE_STANDARD_INFORMATION *info;
+            ULONG got = 0;
+            NTSTATUS st;
+            const WCHAR *nameW;
+            const WCHAR *altW;
+            USHORT nameLen;
+            USHORT altLen;
+            CHAR nameA[64];
+            CHAR altA[32];
+
+            RtlZeroMemory(buf, sizeof(buf));
+            st = FltEnumerateFilterInformation(
+                idx,
+                CV_FLT_INFO_CLASS_AGG_STD,
+                buf,
+                sizeof(buf),
+                &got);
+
+            if (st == STATUS_NO_MORE_ENTRIES) {
+                enumOk = TRUE;
+                break;
+            }
+            if (st == STATUS_BUFFER_TOO_SMALL && got > sizeof(buf)) {
+                /* Skip oversized rare entries rather than fail the whole pass. */
+                continue;
+            }
+            if (!NT_SUCCESS(st)) {
+                if (!firstFail) {
+                    firstFail = TRUE;
+                    firstSt = st;
+                }
+                break;
+            }
+
+            enumOk = TRUE;
+            total++;
+            info = (CV_FILTER_AGGREGATE_STANDARD_INFORMATION *)buf;
+
+            if (info->Flags & CV_FLTFL_ASI_IS_MINIFILTER) {
+                mini++;
+                nameLen = info->Type.MiniFilter.FilterNameLength;
+                altLen = info->Type.MiniFilter.FilterAltitudeLength;
+                nameW = (const WCHAR *)(buf + info->Type.MiniFilter.FilterNameBufferOffset);
+                altW = (const WCHAR *)(buf + info->Type.MiniFilter.FilterAltitudeBufferOffset);
+            } else {
+                legacy++;
+                nameLen = info->Type.LegacyFilter.FilterNameLength;
+                altLen = info->Type.LegacyFilter.FilterAltitudeLength;
+                nameW = (const WCHAR *)(buf + info->Type.LegacyFilter.FilterNameBufferOffset);
+                altW = (const WCHAR *)(buf + info->Type.LegacyFilter.FilterAltitudeBufferOffset);
+            }
+
+            if ((PUCHAR)nameW < buf ||
+                (PUCHAR)nameW + nameLen > buf + sizeof(buf) ||
+                nameLen == 0) {
+                continue;
+            }
+            if (!altW || altLen == 0 ||
+                (PUCHAR)altW < buf ||
+                (PUCHAR)altW + altLen > buf + sizeof(buf)) {
+                altLen = 0;
+                altW = NULL;
+            }
+
+            CvCopyWideToAnsi(nameW, nameLen, nameA, sizeof(nameA));
+            altA[0] = 0;
+            if (altW && altLen) {
+                CvCopyWideToAnsi(altW, altLen, altA, sizeof(altA));
+            }
+
+            if (CvWideContainsAsciiI(nameW, nameLen, "WdFilter") ||
+                CvNameTailMatchA(nameA, "WdFilter")) {
+                wdRegistered++;
+            }
+            if (altA[0] && CvWideEqualsAsciiI(altW, altLen, CV_WD_FILTER_ALTITUDE)) {
+                alt328010++;
+            }
+
+            if (sample[0] == 0 && nameA[0]) {
+                if (altA[0]) {
+                    RtlStringCbPrintfA(sample, sizeof(sample), "%s@%s", nameA, altA);
+                } else {
+                    RtlStringCbPrintfA(sample, sizeof(sample), "%s", nameA);
+                }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        CvAdd(R, CvSevMedium, "filter", "T12.e",
+              "FltMgr enumeration raised",
+              "SEH caught during FltEnumerateFilterInformation. Filter Manager state may be unstable.",
+              "FltEnumerateFilterInformation");
+        return;
+    }
+
+    if (!enumOk && firstFail) {
+        RtlStringCbPrintfA(ev, sizeof(ev), "status=0x%08X wdMapped=%u", (ULONG)firstSt, wdMapped ? 1u : 0u);
+        CvAdd(R, CvSevMedium, "filter", "T12.e",
+              "FltMgr filter enumeration failed",
+              "FltEnumerateFilterInformation returned an error before any entry. Compare with fltmc filters from an elevated prompt.",
+              ev);
+        return;
+    }
+
+    RtlStringCbPrintfA(ev, sizeof(ev),
+                       "filters=%lu mini=%lu leg=%lu wdReg=%lu alt328010=%lu wdMap=%u %s",
+                       total, mini, legacy, wdRegistered, alt328010,
+                       wdMapped ? 1u : 0u,
+                       sample[0] ? sample : "-");
+
+    if (wdMapped && wdRegistered == 0) {
+        CvAdd(R, CvSevHigh, "filter", "T12.e",
+              "WdFilter mapped but not registered with FltMgr",
+              "WdFilter.sys is in PsLoadedModules yet FltEnumerateFilterInformation lists no WdFilter minifilter. Classic FudModule-class minifilter teardown (T12.e).",
+              ev);
+        return;
+    }
+
+    if (wdMapped && alt328010 == 0) {
+        CvAdd(R, CvSevHigh, "filter", "T12.e",
+              "WdFilter AV altitude 328010 missing",
+              "WdFilter.sys is mapped but no minifilter advertises altitude 328010 (Defender AV FSFilter band). Possible altitude strip / teardown residue.",
+              ev);
+        return;
+    }
+
+    if (total == 0) {
+        CvAdd(R, CvSevHigh, "filter", "T12.e",
+              "No Filter Manager filters registered",
+              "FltEnumerateFilterInformation returned zero entries. Healthy Win11 hosts register multiple inbox minifilters (WdFilter, FileCrypt, bindflt, ...).",
+              ev);
+        return;
+    }
+
+    CvAdd(R, CvSevClean, "filter", "T12.e",
+          "Minifilter enumeration from FltMgr completed",
+          "FltEnumerateFilterInformation walked registered filters (fltmc filters equivalent). Cross-check WdFilter registration and altitude 328010 against PsLoadedModules.",
+          ev);
+
+    if (wdMapped && wdRegistered > 0 && alt328010 > 0) {
+        CHAR ev2[CV_EVIDENCE_LEN];
+        RtlStringCbPrintfA(ev2, sizeof(ev2), "WdFilter registered; altitude 328010 present");
+        CvAdd(R, CvSevInfo, "filter", "T12.e",
+              "WdFilter minifilter present in FltMgr",
+              "Mapped WdFilter.sys matches a FltMgr registration with Defender AV altitude 328010. Teardown not indicated on this pass.",
+              ev2);
+    }
 }
 
 static void CvScanBugcheck(CV_SCAN_RESULT *R)
