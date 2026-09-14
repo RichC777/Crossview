@@ -9,7 +9,7 @@ Two halves:
 | `windows/` | WDM driver (`crossview.sys`), `cvscan.exe`, Win32 GUI. Compile and test-sign on a lab box. |
 | `src/` | Browser lab console: technique matrix, FudModule 3.1 notes, Sigma/KQL pack, WDAC allow-known-good checklist, LOLDrivers vs Microsoft VDBL hash feed. |
 
-The web console **simulates** scans. Ring 0 walks only run after you build and load the driver on Windows.
+The web console is documentation only and does not talk to the driver. Ring-0 walks only run after you build and load `crossview.sys` on Windows.
 
 ## Windows lab (real scanner)
 
@@ -28,21 +28,26 @@ See [windows/README.md](windows/README.md).
 
 ## Web lab
 
+Vite + TanStack Router documentation UI. It does **not** talk to the Windows driver.
+
 ```bash
 npm install
 npm run dev
 ```
 
-- `/` scanner fixture
+Serves the shell at `http://localhost:8080`. Production bundle: `npm run build` (typecheck + Vite) then `npm run preview`.
+
+- `/` scanner fixture (docs only)
 - `/matrix` technique matrix
-- `/campaign` FudModule 3.1
-- `/detections` Sigma + KQL
-- `/policy` WDAC checklist + LOLDrivers hash gap
-- `/package` driver/CLI/GUI download notes
+- `/campaign` FudModule 3.1 notes
+- `/detections` in-repo `windows/detections/` files (Sysmon + markdown). Honest empty state for Sigma/KQL
+- `/policy` WDAC checklist. LOLDrivers hash gap is empty until `loldrivers-gap.json` exists
+- `/package` driver/CLI/GUI build notes
+- `/cli` `cvscan.exe` flags
 
 ## Detections pack
 
-`windows/detections/` — Sysmon fragment, Sigma, KQL, LOLDrivers-vs-VDBL CSV, WDAC checklist.
+`windows/detections/` — Sysmon fragment and WDAC checklist are in-tree. Sigma, KQL, and the LOLDrivers-vs-VDBL CSV are not checked in yet (the Rules/Policy pages say so).
 
 Deny overlay XML is generated from the Policy → Hash feed tab. Deploy it as a **second** App Control base policy (Allow All + Deny hashes), never as the only policy.
 
