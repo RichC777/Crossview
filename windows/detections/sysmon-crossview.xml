@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  CROSSVIEW Sysmon fragment for BYOVD hunts.
+  Merge into an existing config. Do not paste as-is over a production policy
+  without a ring.
+
+  The important part: DriverLoad logs SIGNED drivers. Classic BYOVD is a
+  validly signed .sys. Excluding Signed=true is how this technique goes dark.
+
+  Schema 4.90. Sysmon 15+.
+-->
+<Sysmon schemaversion="4.90">
+  <EventFiltering>
+    <!-- Event 6: every kernel driver load. Empty exclude = log all. -->
+    <RuleGroup name="CROSSVIEW-DriverLoad" groupRelation="or">
+      <DriverLoad onmatch="include">
+        <ImageLoaded condition="end with">.sys</ImageLoaded>
+      </DriverLoad>
+    </RuleGroup>
+
+    <!-- Event 5: death of PPL / EDR / Sysmon itself. -->
+    <RuleGroup name="CROSSVIEW-PPLDeath" groupRelation="or">
+      <ProcessTerminate onmatch="include">
+        <Image condition="end with">MsMpEng.exe</Image>
+        <Image condition="end with">MsSense.exe</Image>
+        <Image condition="end with">SenseIR.exe</Image>
+        <Image condition="end with">NisSrv.exe</Image>
+        <Image condition="end with">CSFalconService.exe</Image>
+        <Image condition="end with">CSFalconContainer.exe</Image>
+        <Image condition="end with">SentinelAgent.exe</Image>
+        <Image condition="end with">SentinelServiceHost.exe</Image>
+        <Image condition="end with">elastic-agent.exe</Image>
+        <Image condition="end with">elastic-endpoint.exe</Image>
+        <Image condition="end with">CylanceSvc.exe</Image>
+        <Image condition="end with">Sysmon64.exe</Image>
+        <Image condition="end with">Sysmon.exe</Image>
+      </ProcessTerminate>
+    </RuleGroup>
+
+    <!-- Event 10: LSASS access. Filter EDR in the SIEM, not here. -->
+    <RuleGroup name="CROSSVIEW-LSASS" groupRelation="or">
+      <ProcessAccess onmatch="include">
+        <TargetImage condition="end with">lsass.exe</TargetImage>
+      </ProcessAccess>
+    </RuleGroup>
+
+    <!-- Event 1: registration and clock-tamper tooling. -->
+    <RuleGroup name="CROSSVIEW-Create" groupRelation="or">
+      <ProcessCreate onmatch="include">
+        <Image condition="end with">sc.exe</Image>
+        <Image condition="end with">pnputil.exe</Image>
+        <Image condition="end with">w32tm.exe</Image>
+      </ProcessCreate>
+      <ProcessCreate onmatch="include">
+        <CommandLine condition="contains">Set-Date</CommandLine>
+      </ProcessCreate>
+      <ProcessCreate onmatch="include">
+        <CommandLine condition="contains all">stop;w32time</CommandLine>
+      </ProcessCreate>
+    </RuleGroup>
+  </EventFiltering>
+</Sysmon>
