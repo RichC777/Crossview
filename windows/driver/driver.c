@@ -17,6 +17,7 @@ static FAST_MUTEX g_Lock;
 DRIVER_UNLOAD CvUnload;
 DRIVER_DISPATCH CvCreateClose;
 DRIVER_DISPATCH CvDeviceControl;
+DRIVER_INITIALIZE DriverEntry;
 
 #ifdef ALLOC_PRAGMA
 #pragma alloc_text(INIT, DriverEntry)
