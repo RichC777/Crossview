@@ -37,7 +37,7 @@ npm run dev
 
 Serves the shell at `http://localhost:8080`. Production bundle: `npm run build` (typecheck + Vite) then `npm run preview`.
 
-- `/` scanner fixture (docs only)
+- `/` scanner fixture: sample `cvscan --full --json` findings from `src/fixtures/cvscan-sample-report.json` with severity/module filters, plus client-side paste-in of a local `report.json` (docs only, never live)
 - `/matrix` technique matrix
 - `/campaign` FudModule 3.1 notes
 - `/detections` in-repo `windows/detections/` files (Sysmon, starter Sigma/KQL, curated LOLDrivers CSV, markdown)
