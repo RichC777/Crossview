@@ -43,7 +43,7 @@ if errorlevel 1 exit /b 1
 
 echo [2/3] cvscan.exe
 cl /nologo /W3 /O2 /Zi /DUNICODE /D_UNICODE /Fe"%OUT%\cvscan.exe" /Fo"%OUT%\obj\cvscan.obj" ^
-  /Fd"%OUT%\obj\cvscan.pdb" cli\cvscan.c advapi32.lib version.lib
+  /Fd"%OUT%\obj\cvscan.pdb" cli\cvscan.c advapi32.lib version.lib fwpuclnt.lib rpcrt4.lib
 if errorlevel 1 exit /b 1
 
 echo [3/3] CrossView.exe
