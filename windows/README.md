@@ -51,7 +51,7 @@ CrossView.exe
 | WFP / network | T12.b — Fwpm provider/callout/filter enum from the CLI (BFE) |
 | Inline / SSDT / IDT / LSTAR | T1.* T3.* T5.a |
 | Dispatch | T4.d T4.e T4.f — AFD / NSI / Null |
-| Crash dumps | T12.i |
+| Crash dumps | T12.i - export-LEA walk of KeBugCheck* callback lists + LDR orphan cross-view |
 | Integrity | T14.d T15.c — afd.sys vs KB5121003, SAC |
 
 FudModule 3.1 is **data-only**. A clean SSDT/hook scan plus dead ETW and empty EDR callback slots **is the hit**, not a clean bill of health.
