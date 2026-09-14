@@ -3,7 +3,7 @@
 #include <intrin.h>
 
 /*
- * CROSSVIEW kernel scans — detection only.
+ * CROSSVIEW kernel scans â€” detection only.
  * Every walk is wrapped in SEH. We never write kernel memory.
  */
 
@@ -330,12 +330,349 @@ static void CvScanDispatch(CV_SCAN_RESULT *R)
     }
 }
 
+/*
+ * T11.a — process / thread / image notify callbacks (FudModule teardown class).
+ *
+ * Resolve Psp*NotifyRoutine arrays by decoding RIP-relative LEAs from the
+ * exported setters (or their first near-call callee). Same version-safe style
+ * as offsets.c — no PDB, no SSDT, read-only. Validated on Win11 26200
+ * (ntoskrnl 10.0.26100.9444): 64 EX_FAST_REF slots, Function at block+0x08.
+ *
+ * Cross-view: if WdFilter.sys is mapped but no notify Function lands in its
+ * image, treat as FudModule-class callback teardown.
+ */
+#define CV_NOTIFY_SLOTS     64
+#define CV_FAST_REF_MASK    (~(ULONG_PTR)0xF)
+#define CV_CB_FN_OFF        0x08
+
+typedef struct _CV_MOD_RANGE {
+    PVOID Base;
+    ULONG Size;
+    CHAR  Name[64];
+} CV_MOD_RANGE;
+
+static PVOID CvFollowNearCall(const UCHAR *p, ULONG MaxScan)
+{
+    ULONG i;
+    if (!p || !MmIsAddressValid((PVOID)p)) {
+        return NULL;
+    }
+    for (i = 0; i + 5 <= MaxScan; i++) {
+        if (!MmIsAddressValid((PVOID)(p + i + 4))) {
+            break;
+        }
+        if (p[i] == 0xE8) {
+            LONG rel = *(LONG *)(p + i + 1);
+            return (PVOID)(p + i + 5 + rel);
+        }
+        if (i + 4 <= MaxScan &&
+            p[i] == 0xF3 && p[i + 1] == 0x0F && p[i + 2] == 0x1E && p[i + 3] == 0xFA) {
+            i += 3;
+        }
+    }
+    return NULL;
+}
+
+static PVOID CvFindLeaRipTarget(const UCHAR *p, ULONG MaxScan)
+{
+    ULONG i;
+    if (!p || !MmIsAddressValid((PVOID)p)) {
+        return NULL;
+    }
+    for (i = 0; i + 7 <= MaxScan; i++) {
+        UCHAR modrm;
+        LONG imm;
+        if (!MmIsAddressValid((PVOID)(p + i + 6))) {
+            break;
+        }
+        if ((p[i] == 0x48 || p[i] == 0x4C) && p[i + 1] == 0x8D) {
+            modrm = p[i + 2];
+            if ((modrm & 0xC7) == 0x05) {
+                imm = *(LONG *)(p + i + 3);
+                return (PVOID)(p + i + 7 + imm);
+            }
+        }
+    }
+    return NULL;
+}
+
+static PVOID CvGetExportA(const WCHAR *Name)
+{
+    UNICODE_STRING u;
+    RtlInitUnicodeString(&u, Name);
+    return MmGetSystemRoutineAddress(&u);
+}
+
+static PVOID CvResolveNotifyArray(const WCHAR *ExportName)
+{
+    const UCHAR *exp;
+    PVOID arr;
+    PVOID callee;
+
+    exp = (const UCHAR *)CvGetExportA(ExportName);
+    if (!exp) {
+        return NULL;
+    }
+    arr = CvFindLeaRipTarget(exp, 0x100);
+    if (arr && MmIsAddressValid(arr)) {
+        return arr;
+    }
+    callee = CvFollowNearCall(exp, 0x40);
+    if (!callee || !MmIsAddressValid(callee)) {
+        return NULL;
+    }
+    arr = CvFindLeaRipTarget((const UCHAR *)callee, 0x100);
+    if (arr && MmIsAddressValid(arr)) {
+        return arr;
+    }
+    return NULL;
+}
+
+static ULONG CvCollectNotifyFns(PVOID Array, PVOID *Out, ULONG MaxOut)
+{
+    ULONG i;
+    ULONG n = 0;
+
+    if (!Array || !Out || !MaxOut) {
+        return 0;
+    }
+    __try {
+        for (i = 0; i < CV_NOTIFY_SLOTS; i++) {
+            ULONG_PTR slot;
+            PVOID block;
+            PVOID fn;
+
+            if (!MmIsAddressValid((PUCHAR)Array + i * sizeof(PVOID))) {
+                break;
+            }
+            slot = *(ULONG_PTR *)((PUCHAR)Array + i * sizeof(PVOID));
+            block = (PVOID)(slot & CV_FAST_REF_MASK);
+            if (!block) {
+                continue;
+            }
+            if (!MmIsAddressValid((PUCHAR)block + CV_CB_FN_OFF + sizeof(PVOID) - 1)) {
+                continue;
+            }
+            fn = *(PVOID *)((PUCHAR)block + CV_CB_FN_OFF);
+            if (!fn || (ULONG_PTR)fn < 0xFFFF800000000000ULL) {
+                continue;
+            }
+            if (n < MaxOut) {
+                Out[n++] = fn;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return n;
+    }
+    return n;
+}
+
+static BOOLEAN CvNameTailMatchA(const CHAR *Path, const CHAR *Tail)
+{
+    SIZE_T lp;
+    SIZE_T lt;
+    SIZE_T i;
+    if (!Path || !Tail) {
+        return FALSE;
+    }
+    lp = 0;
+    while (Path[lp]) {
+        lp++;
+    }
+    lt = 0;
+    while (Tail[lt]) {
+        lt++;
+    }
+    if (lt == 0 || lp < lt) {
+        return FALSE;
+    }
+    for (i = 0; i < lt; i++) {
+        CHAR a = Path[lp - lt + i];
+        CHAR b = Tail[i];
+        if (a >= 'A' && a <= 'Z') {
+            a = (CHAR)(a - 'A' + 'a');
+        }
+        if (b >= 'A' && b <= 'Z') {
+            b = (CHAR)(b - 'A' + 'a');
+        }
+        if (a != b) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static ULONG CvSnapshotSecurityMods(CV_MOD_RANGE *Out, ULONG MaxOut, BOOLEAN *WdFilterPresent)
+{
+    CV_SYS_MODULE_INFO *info = NULL;
+    ULONG size = 0;
+    ULONG n = 0;
+    ULONG i;
+    NTSTATUS st;
+    static const CHAR *kTails[] = {
+        "wdfilter.sys",
+        "wdnisdrv.sys",
+        "sysmon.sys",
+        "sysmondrv.sys",
+        NULL
+    };
+
+    if (WdFilterPresent) {
+        *WdFilterPresent = FALSE;
+    }
+    st = ZwQuerySystemInformation(CV_SystemModuleInformation, NULL, 0, &size);
+    if (size == 0) {
+        return 0;
+    }
+    size += 0x1000;
+    info = (CV_SYS_MODULE_INFO *)ExAllocatePool2(POOL_FLAG_NON_PAGED, size, 'bCxC');
+    if (!info) {
+        return 0;
+    }
+    st = ZwQuerySystemInformation(CV_SystemModuleInformation, info, size, &size);
+    if (!NT_SUCCESS(st)) {
+        ExFreePool(info);
+        return 0;
+    }
+    for (i = 0; i < info->NumberOfModules && n < MaxOut; i++) {
+        const CHAR *path = (const CHAR *)info->Modules[i].FullPathName;
+        const CHAR **t;
+        for (t = kTails; *t; ++t) {
+            if (CvNameTailMatchA(path, *t)) {
+                Out[n].Base = info->Modules[i].ImageBase;
+                Out[n].Size = info->Modules[i].ImageSize;
+                RtlStringCbCopyA(Out[n].Name, sizeof(Out[n].Name), *t);
+                if (WdFilterPresent && CvNameTailMatchA(path, "wdfilter.sys")) {
+                    *WdFilterPresent = TRUE;
+                }
+                n++;
+                break;
+            }
+        }
+    }
+    ExFreePool(info);
+    return n;
+}
+
+static BOOLEAN CvFnInRanges(PVOID Fn, const CV_MOD_RANGE *Mods, ULONG ModCount, CHAR *HitName, SIZE_T HitLen)
+{
+    ULONG i;
+    for (i = 0; i < ModCount; i++) {
+        PUCHAR b = (PUCHAR)Mods[i].Base;
+        if (!b || !Mods[i].Size) {
+            continue;
+        }
+        if ((PUCHAR)Fn >= b && (PUCHAR)Fn < b + Mods[i].Size) {
+            if (HitName && HitLen) {
+                RtlStringCbCopyA(HitName, HitLen, Mods[i].Name);
+            }
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static void CvScanCallbacks(CV_SCAN_RESULT *R)
 {
-    CvAdd(R, CvSevInfo, "callback", "T11.a",
-          "Callback arrays require a symbol-backed pass",
-          "This build of the driver does not pattern-scan PspCreateProcessNotifyRoutine (too build-fragile without PDB). Pair with the usermode ETW heartbeat and with loaded-module presence of WdFilter/EDR. Empty vendor slots while those .sys files are mapped is FudModule-class.",
-          "use --fudmodule with ETW + usermode");
+    PVOID procArr = NULL;
+    PVOID thrArr = NULL;
+    PVOID imgArr = NULL;
+    PVOID fns[CV_NOTIFY_SLOTS * 3];
+    ULONG nProc = 0;
+    ULONG nThr = 0;
+    ULONG nImg = 0;
+    ULONG nAll = 0;
+    ULONG i;
+    ULONG intoWd = 0;
+    BOOLEAN wdPresent = FALSE;
+    CV_MOD_RANGE mods[16];
+    ULONG modCount;
+    CHAR ev[CV_EVIDENCE_LEN];
+
+    RtlZeroMemory(fns, sizeof(fns));
+    RtlZeroMemory(mods, sizeof(mods));
+
+    modCount = CvSnapshotSecurityMods(mods, 16, &wdPresent);
+
+    __try {
+        procArr = CvResolveNotifyArray(L"PsSetCreateProcessNotifyRoutine");
+        if (!procArr) {
+            procArr = CvResolveNotifyArray(L"PsSetCreateProcessNotifyRoutineEx");
+        }
+        thrArr = CvResolveNotifyArray(L"PsSetCreateThreadNotifyRoutine");
+        imgArr = CvResolveNotifyArray(L"PsSetLoadImageNotifyRoutineEx");
+        if (!imgArr) {
+            imgArr = CvResolveNotifyArray(L"PsSetLoadImageNotifyRoutine");
+        }
+
+        if (procArr) {
+            nProc = CvCollectNotifyFns(procArr, fns + nAll, CV_NOTIFY_SLOTS);
+            nAll += nProc;
+        }
+        if (thrArr) {
+            nThr = CvCollectNotifyFns(thrArr, fns + nAll, CV_NOTIFY_SLOTS);
+            nAll += nThr;
+        }
+        if (imgArr) {
+            nImg = CvCollectNotifyFns(imgArr, fns + nAll, CV_NOTIFY_SLOTS);
+            nAll += nImg;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        CvAdd(R, CvSevMedium, "callback", "T11.a",
+              "Exception resolving notify callback arrays",
+              "SEH during export-LEA decode or slot walk. Refusing to guess on this build.",
+              "EXCEPTION in CvScanCallbacks");
+        return;
+    }
+
+    if (!procArr && !thrArr && !imgArr) {
+        CvAdd(R, CvSevMedium, "callback", "T11.a",
+              "Notify callback arrays not resolved",
+              "Export-LEA decode failed for process/thread/image setters. No PDB fallback in this build.",
+              "PsSet*NotifyRoutine LEA miss");
+        return;
+    }
+
+    for (i = 0; i < nAll; i++) {
+        CHAR hit[64];
+        RtlZeroMemory(hit, sizeof(hit));
+        if (CvFnInRanges(fns[i], mods, modCount, hit, sizeof(hit))) {
+            if (CvNameTailMatchA(hit, "wdfilter.sys")) {
+                intoWd++;
+            }
+        }
+    }
+
+    RtlStringCbPrintfA(ev, sizeof(ev),
+                       "proc=%lu thr=%lu img=%lu  WdFilter=%s inWd=%lu secMods=%lu",
+                       nProc, nThr, nImg,
+                       wdPresent ? "mapped" : "absent",
+                       intoWd, modCount);
+
+    if (wdPresent && intoWd == 0) {
+        CvAdd(R, CvSevHigh, "callback", "T11.a",
+              "WdFilter mapped but absent from notify callbacks",
+              "WdFilter.sys is in PsLoadedModules yet no process/thread/image notify Function points into it. Classic FudModule-class callback teardown (T11.a).",
+              ev);
+    } else if (nAll == 0) {
+        CvAdd(R, CvSevHigh, "callback", "T11.a",
+              "All notify callback arrays are empty",
+              "Resolved Psp*NotifyRoutine arrays but every EX_FAST_REF slot is vacant. Healthy Win11 hosts register CI/WdFilter/third-party notifiers.",
+              ev);
+    } else {
+        CvAdd(R, CvSevClean, "callback", "T11.a",
+              "Notify callback arrays populated",
+              "Export-LEA resolved process/thread/image arrays on this build. Cross-check vendor slots against mapped EDR modules.",
+              ev);
+        if (wdPresent && intoWd > 0) {
+            CHAR ev2[CV_EVIDENCE_LEN];
+            RtlStringCbPrintfA(ev2, sizeof(ev2), "WdFilter owns %lu notify Function(s)", intoWd);
+            CvAdd(R, CvSevInfo, "callback", "T11.a",
+                  "WdFilter notify callbacks present",
+                  "At least one Psp*NotifyRoutine slot points into WdFilter.sys. Teardown not indicated on this pass.",
+                  ev2);
+        }
+    }
 }
 
 static void CvScanEtw(CV_SCAN_RESULT *R)
@@ -358,7 +695,7 @@ static void CvScanBugcheck(CV_SCAN_RESULT *R)
 {
     CvAdd(R, CvSevInfo, "bugcheck", "T12.i",
           "BugCheckReasonCallback list not walked in this build",
-          "KeRegisterBugCheckReasonCallback entries are undocumented. Check for a dump-path callback whose ComponentRoutine is not in any LDR entry — FudModule 3.1's forensic-cleanup step.",
+          "KeRegisterBugCheckReasonCallback entries are undocumented. Check for a dump-path callback whose ComponentRoutine is not in any LDR entry â€” FudModule 3.1's forensic-cleanup step.",
           "crashdmp.sys still loaded is not sufficient");
 }
 
@@ -454,7 +791,7 @@ static void CvScanSsdt(CV_SCAN_RESULT *R)
 {
     CvAdd(R, CvSevInfo, "ssdt", "T1.a",
           "SSDT not dumped (PatchGuard-sensitive)",
-          "Reading KeServiceDescriptorTable is possible but version-fragile. If SSDT hooks survive on x64, PatchGuard is already dead — look at T12.m / T17 first. FudModule 3.1 does not hook SSDT.",
+          "Reading KeServiceDescriptorTable is possible but version-fragile. If SSDT hooks survive on x64, PatchGuard is already dead â€” look at T12.m / T17 first. FudModule 3.1 does not hook SSDT.",
           "data-only kits skip this");
 }
 

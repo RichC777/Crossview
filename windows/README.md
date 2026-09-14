@@ -45,7 +45,7 @@ CrossView.exe
 | Process cross-view | T2.b T2.j — ActiveProcessLinks walk vs CID (usermode) |
 | Token / PPL | T2.d T15.d T15.e |
 | Drivers / BYOVD | T2.a T16.a T14.d — LOLDrivers names in PsLoadedModules |
-| Callbacks | T11.a — FudModule teardown (symbol-backed pass is a follow-up) |
+| Callbacks | T11.a — export-LEA walk of Psp*NotifyRoutine + WdFilter cross-view |
 | ETW | T15.b T12.c T12.d — 94-GUID kill-list from the CLI |
 | Minifilters | T12.e |
 | Inline / SSDT / IDT / LSTAR | T1.* T3.* T5.a |
