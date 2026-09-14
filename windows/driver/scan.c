@@ -675,12 +675,14 @@ static void CvScanCallbacks(CV_SCAN_RESULT *R)
     }
 }
 
+/*
+ * T15.b — FudModule 94-GUID ETW kill-list probe.
+ * EnableMask lives in EtwpHostSiloState (undocumented). The real probe is in
+ * cvscan (cli/etw-guids.h + StartTrace/EnableTraceEx2). Detection-only.
+ */
 static void CvScanEtw(CV_SCAN_RESULT *R)
 {
-    CvAdd(R, CvSevInfo, "etw", "T15.b",
-          "Kernel ETW enablement sampled from user-mode",
-          "Provider EnableMask lives in EtwpHostSiloState (undocumented, silo-relative). The CLI probes the published 94-GUID FudModule kill-list from user-mode with StartTrace/EnableTrace. A silent Threat-Intelligence session plus a live host is T15.b.",
-          "94-GUID list in etw-guids / cvscan --fudmodule");
+    (void)R;
 }
 
 /*
