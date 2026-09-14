@@ -15,6 +15,7 @@ NTSYSAPI NTSTATUS NTAPI ZwQuerySystemInformation(
 );
 
 #define CV_SystemModuleInformation 11
+#define CV_FAST_REF_MASK           (~(ULONG_PTR)0xF)
 
 typedef struct _CV_SYS_MODULE_ENTRY {
     HANDLE Section;
@@ -126,28 +127,90 @@ static void CvScanProcess(CV_SCAN_RESULT *R, const CV_OFFSETS *Off)
     }
 }
 
-static void CvScanToken(CV_SCAN_RESULT *R)
+/*
+ * T2.d — kernel token / PPL cross-view. Uses the version-safe Token, Protection
+ * and ImageFileName offsets from offsets.c. Read-only: masks each EPROCESS
+ * primary-token EX_FAST_REF and flags any non-SYSTEM process wielding PID 4's
+ * token (classic token-theft/DKOM elevation), and counts PPL processes.
+ * Soft-fails to INFO when the Token offset is unresolved on this build.
+ */
+static void CvScanToken(CV_SCAN_RESULT *R, const CV_OFFSETS *Off)
 {
-    PEPROCESS proc = PsGetCurrentProcess();
-    HANDLE pid;
+    PEPROCESS sys = PsInitialSystemProcess;
+    PUCHAR sysBase = (PUCHAR)sys;
+    ULONG_PTR sysToken;
+    PLIST_ENTRY head;
+    PLIST_ENTRY it;
+    ULONG walked = 0;
+    ULONG ppl = 0;
+    ULONG theft = 0;
+
+    if (!Off->Valid || !Off->Token) {
+        CvAdd(R, CvSevInfo, "token", "T2.d",
+              "Token / PPL offsets unresolved",
+              "EPROCESS Token offset did not resolve on this build. Skipping kernel token cross-view; the user-mode companion still runs.",
+              "Off->Token == 0");
+        return;
+    }
 
     __try {
-        pid = PsGetProcessId(proc);
-        if (pid == (HANDLE)(ULONG_PTR)4) {
-            CvAdd(R, CvSevInfo, "token", "T2.d",
-                  "IRP originated from SYSTEM",
-                  "Caller is PID 4. Token theft checks for other processes happen in the usermode companion via NtQueryInformationProcess.",
-                  "PID 4");
-        } else {
-            CHAR ev[CV_EVIDENCE_LEN];
-            RtlStringCbPrintfA(ev, sizeof(ev), "Caller PID %llu", (unsigned long long)(ULONG_PTR)pid);
-            CvAdd(R, CvSevInfo, "token", "T2.d",
-                  "IRP originated from non-SYSTEM process",
-                  "Elevate cvscan/CrossView.exe. Kernel still walks PID 4 independently.",
-                  ev);
+        sysToken = *(ULONG_PTR *)(sysBase + Off->Token) & CV_FAST_REF_MASK;
+        head = (PLIST_ENTRY)(sysBase + Off->ActiveProcessLinks);
+        it = head->Flink;
+        while (it != head && walked < 8192) {
+            PEPROCESS proc = CvProcessFromLinks(it, Off);
+            PUCHAR pb = (PUCHAR)proc;
+            ULONG_PTR tok;
+            HANDLE pid;
+
+            if (!MmIsAddressValid(pb) || !MmIsAddressValid(pb + Off->Token)) {
+                break;
+            }
+            walked++;
+
+            tok = *(ULONG_PTR *)(pb + Off->Token) & CV_FAST_REF_MASK;
+            pid = *(HANDLE *)(pb + Off->UniqueProcessId);
+
+            if (Off->Protection && MmIsAddressValid(pb + Off->Protection) &&
+                (*(UCHAR *)(pb + Off->Protection) & 0x07) != 0) {
+                ppl++;
+            }
+
+            if (tok == sysToken && pid != (HANDLE)(ULONG_PTR)4 && pid != NULL) {
+                CHAR ev[CV_EVIDENCE_LEN];
+                CHAR nm[16];
+                RtlZeroMemory(nm, sizeof(nm));
+                if (Off->ImageFileName && MmIsAddressValid(pb + Off->ImageFileName + 14)) {
+                    RtlCopyMemory(nm, pb + Off->ImageFileName, 15);
+                }
+                theft++;
+                RtlStringCbPrintfA(ev, sizeof(ev), "PID %llu (%s) holds SYSTEM token",
+                                   (unsigned long long)(ULONG_PTR)pid, nm[0] ? nm : "?");
+                CvAdd(R, CvSevHigh, "token", "T2.d",
+                      "Non-SYSTEM process holds the SYSTEM primary token",
+                      "An EPROCESS other than PID 4 references PID 4's primary token. Classic token-theft elevation. Verify against the legitimate SYSTEM-token holder before triage.",
+                      ev);
+            }
+
+            if (!MmIsAddressValid(it->Flink)) {
+                break;
+            }
+            it = it->Flink;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
-        CvAdd(R, CvSevMedium, "token", "T2.d", "Token probe faulted", "SEH during token module.", NULL);
+        CvAdd(R, CvSevMedium, "token", "T2.d", "Token cross-view faulted", "SEH during EPROCESS token walk.", NULL);
+        return;
+    }
+
+    {
+        CHAR ev[CV_EVIDENCE_LEN];
+        RtlStringCbPrintfA(ev, sizeof(ev),
+                           "walked=%lu ppl=%lu theft=%lu tokOff=0x%X protOff=0x%X imgOff=0x%X",
+                           walked, ppl, theft, Off->Token, Off->Protection, Off->ImageFileName);
+        CvAdd(R, theft ? CvSevHigh : CvSevClean, "token", "T2.d",
+              "Token / PPL cross-view completed",
+              "Masked every EPROCESS primary token against PID 4 and counted PPL processes. Cross-check PID/token pairs against the user-mode companion.",
+              ev);
     }
 }
 
@@ -342,7 +405,6 @@ static void CvScanDispatch(CV_SCAN_RESULT *R)
  * image, treat as FudModule-class callback teardown.
  */
 #define CV_NOTIFY_SLOTS     64
-#define CV_FAST_REF_MASK    (~(ULONG_PTR)0xF)
 #define CV_CB_FN_OFF        0x08
 
 typedef struct _CV_MOD_RANGE {
@@ -1519,7 +1581,7 @@ NTSTATUS CvRunScan(ULONG Modules, CV_SCAN_RESULT *Result, const CV_OFFSETS *Off)
 
     if (Modules & CV_MOD_INTEGRITY) CvScanIntegrity(Result);
     if (Modules & CV_MOD_PROCESS)   CvScanProcess(Result, Off);
-    if (Modules & CV_MOD_TOKEN)     CvScanToken(Result);
+    if (Modules & CV_MOD_TOKEN)     CvScanToken(Result, Off);
     if (Modules & CV_MOD_DRIVER)    CvScanDrivers(Result, FALSE);
     if (Modules & CV_MOD_BYOVD)     CvScanDrivers(Result, TRUE);
     if (Modules & CV_MOD_CALLBACK)  CvScanCallbacks(Result);

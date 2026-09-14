@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <tlhelp32.h>
 #include "../shared/CrossViewShared.h"
 #include <evntrace.h>
 #include "etw-guids.h"
@@ -500,6 +501,66 @@ static void UsermodeIntegrity(CV_SCAN_RESULT *r)
     free(buf);
 }
 
+/*
+ * T2.j — read-only process-count cross-view. Compares the Toolhelp (CID / user)
+ * process view against the kernel ActiveProcessLinks walk reported in the T2.b
+ * finding. Detection-only sanity check: it enumerates, never modifies. A true
+ * PspCidTable-vs-list DKOM cross-view is deferred.
+ */
+static void UsermodeProcessCrossCheck(CV_SCAN_RESULT *r)
+{
+    HANDLE snap;
+    PROCESSENTRY32 pe;
+    ULONG umCount = 0;
+    long kernelCount = -1;
+    ULONG k;
+    CV_FINDING *f;
+
+    if (r->FindingCount >= CV_MAX_FINDINGS) return;
+
+    for (k = 0; k < r->FindingCount; k++) {
+        if (!strcmp(r->Findings[k].Module, "process") &&
+            !strcmp(r->Findings[k].Technique, "T2.b")) {
+            unsigned long n;
+            if (sscanf(r->Findings[k].Evidence, "ActiveProcessLinks walked %lu", &n) == 1) {
+                kernelCount = (long)n;
+                break;
+            }
+        }
+    }
+
+    snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    pe.dwSize = sizeof(pe);
+    if (Process32First(snap, &pe)) {
+        do { umCount++; } while (Process32Next(snap, &pe));
+    }
+    CloseHandle(snap);
+
+    f = &r->Findings[r->FindingCount++];
+    memset(f, 0, sizeof(*f));
+    strncpy(f->Module, "process", CV_MODULE_LEN - 1);
+    strncpy(f->Technique, "T2.j", 15);
+    if (kernelCount < 0) {
+        f->Severity = CvSevInfo;
+        strncpy(f->Title, "User-mode process count (no kernel walk to compare)", CV_TITLE_LEN - 1);
+        _snprintf(f->Detail, CV_DETAIL_LEN - 1,
+                  "Toolhelp (CID/user view) enumerated %lu processes. No kernel ActiveProcessLinks walk was present to diff. Read-only.",
+                  umCount);
+        _snprintf(f->Evidence, CV_EVIDENCE_LEN - 1, "usermode=%lu kernel=n/a", umCount);
+    } else {
+        long delta = (long)umCount - kernelCount;
+        f->Severity = (delta > 16 || delta < -16) ? CvSevLow : CvSevInfo;
+        strncpy(f->Title, "Process-count cross-view (user-mode vs kernel walk)", CV_TITLE_LEN - 1);
+        _snprintf(f->Detail, CV_DETAIL_LEN - 1,
+                  "Toolhelp (CID/user view) saw %lu; kernel ActiveProcessLinks walk saw %ld (delta %ld). "
+                  "The kernel walk excludes the PID 4 head and Toolhelp adds the idle process, so small deltas are expected. "
+                  "A true CID-vs-list DKOM cross-view (PspCidTable) is deferred. Read-only.",
+                  umCount, kernelCount, delta);
+        _snprintf(f->Evidence, CV_EVIDENCE_LEN - 1, "usermode=%lu kernel=%ld delta=%ld", umCount, kernelCount, delta);
+    }
+}
+
 int main(int argc, char **argv)
 {
     int i;
@@ -558,6 +619,8 @@ int main(int argc, char **argv)
     }
 
     UsermodeIntegrity(&result);
+    if (profile & CV_MOD_PROCESS)
+        UsermodeProcessCrossCheck(&result);
     if (profile & CV_MOD_ETW)
         UsermodeEtwProbe(&result);
     if (profile & CV_MOD_NETWORK)

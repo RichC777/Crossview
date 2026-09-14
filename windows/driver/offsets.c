@@ -8,6 +8,13 @@
  *   PsGetProcessId                         -> UniqueProcessId
  *   PsGetProcessImageFileName              -> ImageFileName (15-byte array)
  *   PsGetProcessInheritedFromUniqueProcessId -> InheritedFromUniqueProcessId
+ *   PsIsProtectedProcess / ...Light        -> Protection (PS_PROTECTION byte)
+ *
+ * Token is an EX_FAST_REF with no clean single-instruction accessor, so it is
+ * resolved by cross-check instead of decode: PsReferencePrimaryToken hands back
+ * the System process's real token pointer, and we find the EPROCESS slot whose
+ * masked value matches. This validates the offset against an export the same way
+ * the ActiveProcessLinks walk validates UniqueProcessId.
  *
  * ActiveProcessLinks is UniqueProcessId + sizeof(PVOID) on every NT build since
  * XP. We prove that by walking the circular list from PsInitialSystemProcess.
@@ -17,12 +24,17 @@
  *
  * On this lab image (ntoskrnl 10.0.26100.9444 / NtBuild 26200) the export decode
  * yields UniqueProcessId=0x1D0, ActiveProcessLinks=0x1D8, ImageFileName=0x338,
- * InheritedFrom=0x2D0. Memory-scan fallback remains for builds without a
- * recognizable prologue.
+ * InheritedFrom=0x2D0. Token/Protection resolve by the cross-check/decode above.
+ * Each optional offset is left 0 and soft-failed by callers when unresolved.
+ * Memory-scan fallback remains for builds without a recognizable prologue.
  */
+
+NTKERNELAPI PACCESS_TOKEN NTAPI PsReferencePrimaryToken(PEPROCESS Process);
+NTKERNELAPI VOID NTAPI PsDereferencePrimaryToken(PACCESS_TOKEN PrimaryToken);
 
 #define CV_MAX_PROCESS_WALK  8192
 #define CV_SCAN_MAX_OFF      0x800
+#define CV_FAST_REF_MASK     (~(ULONG_PTR)0xF)
 
 static ULONG CvNtBuild(void)
 {
@@ -168,6 +180,114 @@ static ULONG CvScanUniqueProcessId(PEPROCESS SystemProc)
     return 0;
 }
 
+/*
+ * Scan a tiny exported stub for the first "movzx r32, byte ptr [rcx+imm]"
+ * (0F B6 /r with an rcx base). PsIsProtectedProcess reads the Protection byte
+ * this way. Returns 0 on failure.
+ */
+static ULONG CvScanByteDispRcx(const void *Fn, ULONG MaxScan)
+{
+    const UCHAR *p = (const UCHAR *)Fn;
+    ULONG i;
+
+    if (!p || !MmIsAddressValid((PVOID)p)) {
+        return 0;
+    }
+    for (i = 0; i + 7 <= MaxScan; i++) {
+        if (!MmIsAddressValid((PVOID)(p + i + 6))) {
+            break;
+        }
+        if (p[i] != 0x0F || p[i + 1] != 0xB6) {
+            continue;
+        }
+        /* modrm masked to (mod|rm), reg field ignored: [rcx+disp32] / [rcx+disp8] */
+        if ((p[i + 2] & 0xC7) == 0x81) {
+            ULONG imm = *(ULONG *)(p + i + 3);
+            if (imm >= 0x80 && imm < CV_SCAN_MAX_OFF) {
+                return imm;
+            }
+        } else if ((p[i + 2] & 0xC7) == 0x41) {
+            LONG imm8 = (LONG)(CHAR)p[i + 3];
+            if (imm8 >= 0x80 && imm8 < (LONG)CV_SCAN_MAX_OFF) {
+                return (ULONG)imm8;
+            }
+        }
+    }
+    return 0;
+}
+
+/* The 15-byte ImageFileName of PsInitialSystemProcess is always "System". */
+static BOOLEAN CvValidateImageName(PEPROCESS Proc, ULONG Off)
+{
+    const CHAR *name = (const CHAR *)((PUCHAR)Proc + Off);
+
+    if (!Off || Off + 6 >= CV_SCAN_MAX_OFF) {
+        return FALSE;
+    }
+    if (!MmIsAddressValid((PVOID)name) || !MmIsAddressValid((PVOID)(name + 6))) {
+        return FALSE;
+    }
+    return (name[0] == 'S' && name[1] == 'y' && name[2] == 's' &&
+            name[3] == 't' && name[4] == 'e' && name[5] == 'm');
+}
+
+/*
+ * Cross-check Token: PsReferencePrimaryToken returns the System process's real
+ * primary token, so the EPROCESS slot holding that pointer (EX_FAST_REF, low
+ * bits masked) is the Token offset. Reversible — we drop the reference we took.
+ */
+static ULONG CvResolveTokenOffset(PEPROCESS SystemProc)
+{
+    PUCHAR base = (PUCHAR)SystemProc;
+    PACCESS_TOKEN tok;
+    ULONG_PTR tokPtr;
+    ULONG i;
+    ULONG found = 0;
+
+    tok = PsReferencePrimaryToken(SystemProc);
+    if (!tok) {
+        return 0;
+    }
+    tokPtr = (ULONG_PTR)tok & CV_FAST_REF_MASK;
+
+    for (i = 0x80; i + sizeof(PVOID) <= CV_SCAN_MAX_OFF; i += sizeof(PVOID)) {
+        if (!MmIsAddressValid(base + i)) {
+            continue;
+        }
+        if ((*(ULONG_PTR *)(base + i) & CV_FAST_REF_MASK) == tokPtr) {
+            found = i;
+            break;
+        }
+    }
+
+    PsDereferencePrimaryToken(tok);
+    return found;
+}
+
+/*
+ * Decode Protection from PsIsProtectedProcess; require PsIsProtectedProcessLight
+ * to agree when both decode. Bounds-checked; 0 (soft-fail) when unresolved.
+ */
+static ULONG CvResolveProtectionOffset(PEPROCESS SystemProc)
+{
+    ULONG a = CvScanByteDispRcx(CvGetExport(L"PsIsProtectedProcess"), 48);
+    ULONG b = CvScanByteDispRcx(CvGetExport(L"PsIsProtectedProcessLight"), 48);
+    ULONG off;
+
+    if (a && b) {
+        off = (a == b) ? a : 0;
+    } else {
+        off = a ? a : b;
+    }
+    if (!off || off + 1 > CV_SCAN_MAX_OFF) {
+        return 0;
+    }
+    if (!MmIsAddressValid((PUCHAR)SystemProc + off)) {
+        return 0;
+    }
+    return off;
+}
+
 NTSTATUS CvResolveOffsets(CV_OFFSETS *Out)
 {
     PEPROCESS systemProc;
@@ -194,12 +314,16 @@ NTSTATUS CvResolveOffsets(CV_OFFSETS *Out)
     imageOff = CvDecodeExportDisp(CvGetExport(L"PsGetProcessImageFileName"));
     inheritedOff = CvDecodeExportDisp(CvGetExport(L"PsGetProcessInheritedFromUniqueProcessId"));
 
+    if (imageOff && !CvValidateImageName(systemProc, imageOff)) {
+        imageOff = 0;
+    }
+
     Out->UniqueProcessId = uniqueOff;
     Out->ActiveProcessLinks = uniqueOff + sizeof(PVOID);
-    Out->ImageFileName = imageOff;       /* 0 if decode failed — optional */
+    Out->ImageFileName = imageOff;       /* 0 if decode/validate failed — optional */
     Out->InheritedFrom = inheritedOff;   /* 0 if decode failed — optional */
-    Out->Token = 0;
-    Out->Protection = 0;
+    Out->Token = CvResolveTokenOffset(systemProc);        /* 0 if unresolved — optional */
+    Out->Protection = CvResolveProtectionOffset(systemProc); /* 0 if unresolved — optional */
     Out->Valid = TRUE;
     return STATUS_SUCCESS;
 }
