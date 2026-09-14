@@ -52,6 +52,9 @@ NTSTATUS CvDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
             status = STATUS_BUFFER_TOO_SMALL;
             break;
         }
+        if (!g_Offsets.Valid) {
+            CvResolveOffsets(&g_Offsets);
+        }
         RtlZeroMemory(&vi, sizeof(vi));
         vi.Version = CV_VERSION;
         vi.NtBuildNumber = g_Offsets.Build;
@@ -73,6 +76,9 @@ NTSTATUS CvDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         }
         mods = req.Modules ? req.Modules : CV_PROFILE_FUDMODULE;
         ExAcquireFastMutex(&g_Lock);
+        if (!g_Offsets.Valid) {
+            CvResolveOffsets(&g_Offsets);
+        }
         status = CvRunScan(mods, &g_LastScan, &g_Offsets);
         ExReleaseFastMutex(&g_Lock);
         if (NT_SUCCESS(status) && outLen >= sizeof(ULONG) && buf) {
