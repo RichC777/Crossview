@@ -30,7 +30,7 @@ mkdir "%OUT%" 2>nul
 mkdir "%OUT%\obj" 2>nul
 
 echo [1/3] kernel driver
-cl /nologo /c /kernel /GS- /W3 /Zi /Od /D_AMD64_ /D_WIN64 /D_NDEBUG ^
+cl /nologo /c /kernel /GS- /W3 /Zi /Od /D_AMD64_ /D_WIN64 /D_NDEBUG /DNTSTRSAFE_LIB ^
   /I"%~dp0shared" /Fo"%OUT%\obj\\" /Fd"%OUT%\obj\driver.pdb" ^
   driver\driver.c driver\scan.c driver\offsets.c
 if errorlevel 1 exit /b 1
@@ -38,7 +38,7 @@ if errorlevel 1 exit /b 1
 link /nologo /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry /NODEFAULTLIB ^
   /OUT:"%OUT%\crossview.sys" /PDB:"%OUT%\crossview.pdb" /DEBUG ^
   "%OUT%\obj\driver.obj" "%OUT%\obj\scan.obj" "%OUT%\obj\offsets.obj" ^
-  ntoskrnl.lib hal.lib BufferOverflowK.lib libcntpr.lib
+  ntoskrnl.lib hal.lib BufferOverflowK.lib libcntpr.lib ntstrsafe.lib
 if errorlevel 1 exit /b 1
 
 echo [2/3] cvscan.exe
