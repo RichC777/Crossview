@@ -38,7 +38,7 @@ if errorlevel 1 exit /b 1
 link /nologo /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry /NODEFAULTLIB ^
   /OUT:"%OUT%\crossview.sys" /PDB:"%OUT%\crossview.pdb" /DEBUG ^
   "%OUT%\obj\driver.obj" "%OUT%\obj\scan.obj" "%OUT%\obj\offsets.obj" ^
-  ntoskrnl.lib hal.lib BufferOverflowK.lib
+  ntoskrnl.lib hal.lib BufferOverflowK.lib libcntpr.lib
 if errorlevel 1 exit /b 1
 
 echo [2/3] cvscan.exe
