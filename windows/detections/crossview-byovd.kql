@@ -1,0 +1,117 @@
+// CROSSVIEW starter KQL — Sentinel / Defender. Experimental lab pack.
+// Pair with sysmon-crossview.xml. Do not exclude Signed=true on DriverLoad.
+// Workspace table names vary. Event = forwarded Windows logs. DeviceEvents = MDE.
+// These queries read telemetry only. They do not talk to crossview.sys.
+
+// Code Integrity block / audit (VDBL, WDAC, HVCI said no — or would have)
+Event
+| where TimeGenerated > ago(7d)
+| where EventLog has "CodeIntegrity"
+| where EventID in (3076, 3077)
+| project TimeGenerated, Computer, EventID, RenderedDescription
+;
+
+// MDE twin of Sysmon DriverLoad
+DeviceEvents
+| where Timestamp > ago(7d)
+| where ActionType == "DriverLoad"
+| project Timestamp, DeviceName, FileName, FolderPath, SHA256, InitiatingProcessFileName
+;
+
+// SCM: kernel driver service registered from a user-writable path
+Event
+| where TimeGenerated > ago(7d)
+| where EventLog == "System" and EventID == 7045
+| where EventData has_any (@"\Users\", @"\Temp\", @"\AppData\", @"\Downloads\")
+| project TimeGenerated, Computer, EventData
+;
+
+// Sysmon 6 filename floor (signed drivers included)
+Event
+| where TimeGenerated > ago(7d)
+| where Source == "Microsoft-Windows-Sysmon" and EventID == 6
+| where EventData has_any (
+    "gdrv.sys",
+    "RTCore64.sys",
+    "RTCore32.sys",
+    "dbutil_2_3.sys",
+    "dbutil.sys",
+    "AsrDrv103.sys",
+    "WinRing0.sys",
+    "WinRing0x64.sys",
+    "iqvw64e.sys",
+    "AsIO.sys",
+    "GLCKIO2.sys",
+    "MsIo64.sys"
+)
+| project TimeGenerated, Computer, EventData
+;
+
+// PPL / EDR / Sysmon death (Sysmon 5)
+Event
+| where TimeGenerated > ago(7d)
+| where Source == "Microsoft-Windows-Sysmon" and EventID == 5
+| where EventData has_any (
+    "MsMpEng.exe",
+    "MsSense.exe",
+    "SenseIR.exe",
+    "NisSrv.exe",
+    "CSFalconService.exe",
+    "CSFalconContainer.exe",
+    "SentinelAgent.exe",
+    "SentinelServiceHost.exe",
+    "elastic-agent.exe",
+    "elastic-endpoint.exe",
+    "CylanceSvc.exe",
+    "Sysmon64.exe",
+    "Sysmon.exe"
+)
+| project TimeGenerated, Computer, EventData
+;
+
+// LSASS access — Sysmon 10. Filter EDR in the workspace, not in Sysmon.
+Event
+| where TimeGenerated > ago(7d)
+| where Source == "Microsoft-Windows-Sysmon" and EventID == 10
+| where EventData has "lsass.exe"
+| project TimeGenerated, Computer, EventData
+;
+
+// Clock tamper (4616). Ignore 2-second NTP slews; keep day/year deltas.
+SecurityEvent
+| where TimeGenerated > ago(7d)
+| where EventID == 4616
+| project TimeGenerated, Computer, SubjectAccount, NewTime, PreviousTime
+;
+
+// 15-minute correlation: LOLDrivers-name DriverLoad then PPL/EDR death
+let loads = Event
+    | where TimeGenerated > ago(7d)
+    | where Source == "Microsoft-Windows-Sysmon" and EventID == 6
+    | where EventData has_any (
+        "gdrv.sys",
+        "RTCore64.sys",
+        "dbutil_2_3.sys",
+        "AsrDrv103.sys",
+        "WinRing0x64.sys",
+        "iqvw64e.sys"
+    )
+    | project LoadTime = TimeGenerated, Computer, LoadData = EventData;
+let deaths = Event
+    | where TimeGenerated > ago(7d)
+    | where Source == "Microsoft-Windows-Sysmon" and EventID == 5
+    | where EventData has_any (
+        "MsMpEng.exe",
+        "MsSense.exe",
+        "CSFalconService.exe",
+        "SentinelAgent.exe",
+        "elastic-endpoint.exe",
+        "Sysmon64.exe",
+        "Sysmon.exe"
+    )
+    | project DeathTime = TimeGenerated, Computer, DeathData = EventData;
+loads
+| join kind=inner deaths on Computer
+| where DeathTime between (LoadTime .. (LoadTime + 15m))
+| project LoadTime, DeathTime, Computer, LoadData, DeathData
+;

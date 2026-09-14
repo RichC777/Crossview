@@ -1,0 +1,72 @@
+{
+  "available": true,
+  "provenance": "Curated lab sample, not a live scrape. Filenames, SHA256, and authentihash SHA256 copied from public loldrivers.io pages (Magicsword LOLDrivers) on 2026-09-14. VDBL coverage flags are illustrative for the Policy UI — refresh against aka.ms/VulnerableDriverBlockList before using as an allow/deny source.",
+  "lolAsOf": "2026-09-14",
+  "vdblVersion": "sample-not-live",
+  "vdblPolicyId": "sample-not-live",
+  "generated": "2026-09-14",
+  "stats": {
+    "drivers": 5,
+    "samples": 3,
+    "hashCovered": 3,
+    "nameOnly": 2,
+    "gap": 0,
+    "hvciOk": 0,
+    "malicious": 0,
+    "actionable": 2,
+    "vdblHashTokens": 3,
+    "vdblNames": 0
+  },
+  "rows": [
+    {
+      "n": "gdrv.sys",
+      "v": "GIGABYTE",
+      "c": "v",
+      "s": "31f4cfb4c71da44120752721103a16512444c13c2ac2d857a7e6f13cb679b427",
+      "a": "9c0e80958b907c8df345ec2f8d711acefb4951ee3e6e84892ecd429f5e1f3acb",
+      "h": true,
+      "k": "g",
+      "m": "loldrivers.io/drivers/2bea1bca-753c-4f09-bc9f-566ab0193f4a — illustrative VDBL hash hit"
+    },
+    {
+      "n": "RTCore64.sys",
+      "v": "Micro-Star",
+      "c": "v",
+      "s": "01aa278b07b58dc46c84bd0b1b5c8e9ee4e62ea0bf7a695862444af32e87f1fd",
+      "a": "478c36f8af7844a80e24c1822507beef6314519185717ec7ae224a0e04b2f330",
+      "h": true,
+      "k": "g",
+      "m": "loldrivers.io/drivers/e32bc3da-4db1-4858-a62c-6fbe4db6afbd — illustrative VDBL hash hit"
+    },
+    {
+      "n": "dbutil_2_3.sys",
+      "v": "Dell",
+      "c": "v",
+      "s": "0296e2ce999e67c76352613a718e11516fe1b0efc3ffdb8918fc999dd76a73a5",
+      "a": "fe4270a61dbed978c28b2915fcc2826d011148dcb7533fa8bd072ddce5944cef",
+      "h": true,
+      "k": "g",
+      "m": "loldrivers.io/drivers/a4eabc75-edf6-4b74-9a24-6a26187adabf — illustrative VDBL hash hit"
+    },
+    {
+      "n": "AsrDrv103.sys",
+      "v": "ASRock",
+      "c": "v",
+      "s": "",
+      "a": "",
+      "h": false,
+      "k": "n",
+      "m": "Name-only floor in this sample. Add a hash from loldrivers.io before deny-listing."
+    },
+    {
+      "n": "WinRing0x64.sys",
+      "v": "various",
+      "c": "v",
+      "s": "",
+      "a": "",
+      "h": false,
+      "k": "n",
+      "m": "Name-only floor in this sample. Add a hash from loldrivers.io before deny-listing."
+    }
+  ]
+}

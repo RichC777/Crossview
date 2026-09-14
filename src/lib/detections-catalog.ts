@@ -1,8 +1,11 @@
 import detectionsReadme from "../../windows/detections/README.md?raw";
 import wdacChecklist from "../../windows/detections/wdac-checklist.md?raw";
 import sysmonXml from "../../windows/detections/sysmon-crossview.xml?raw";
+import sigmaYml from "../../windows/detections/crossview-byovd-sigma.yml?raw";
+import kql from "../../windows/detections/crossview-byovd.kql?raw";
+import gapCsv from "../../windows/detections/loldrivers-gap.csv?raw";
 
-export type DetectionKind = "sysmon" | "markdown" | "missing";
+export type DetectionKind = "sysmon" | "markdown" | "sigma" | "kql" | "csv" | "missing";
 
 export type DetectionFile = {
   id: string;
@@ -32,6 +35,33 @@ export const DETECTION_FILES: DetectionFile[] = [
     content: sysmonXml,
   },
   {
+    id: "sigma",
+    name: "crossview-byovd-sigma.yml",
+    path: "windows/detections/crossview-byovd-sigma.yml",
+    kind: "sigma",
+    summary:
+      "Starter Sigma (experimental): Code Integrity 3076/3077, SCM 7045 from user-writable paths, LOLDrivers-name DriverLoad, PPL death, LSASS access, 4616 clock tamper.",
+    content: sigmaYml,
+  },
+  {
+    id: "kql",
+    name: "crossview-byovd.kql",
+    path: "windows/detections/crossview-byovd.kql",
+    kind: "kql",
+    summary:
+      "Starter Sentinel / Defender KQL for the same hunts, plus a 15-minute DriverLoad → PPL-death join.",
+    content: kql,
+  },
+  {
+    id: "gap-csv",
+    name: "loldrivers-gap.csv",
+    path: "windows/detections/loldrivers-gap.csv",
+    kind: "csv",
+    summary:
+      "Curated LOLDrivers sample (CSV twin of loldrivers-gap.json). Not a live VDBL scrape. Policy page renders the JSON feed.",
+    content: gapCsv,
+  },
+  {
     id: "wdac",
     name: "wdac-checklist.md",
     path: "windows/detections/wdac-checklist.md",
@@ -39,26 +69,24 @@ export const DETECTION_FILES: DetectionFile[] = [
     summary: "WDAC allow-known-good lab checklist. Live copy also on the Policy page.",
     content: wdacChecklist,
   },
-  {
-    id: "sigma",
-    name: "crossview-byovd-sigma.yml",
-    path: "windows/detections/",
-    kind: "missing",
-    summary:
-      "Sigma YAML is not in this tree. The detections README still points at a Rules-page export that has not been checked in.",
-  },
-  {
-    id: "kql",
-    name: "crossview-byovd.kql",
-    path: "windows/detections/",
-    kind: "missing",
-    summary: "KQL is not in this tree. Same gap as the Sigma pack.",
-  },
-  {
-    id: "gap-csv",
-    name: "loldrivers-gap.csv",
-    path: "windows/detections/",
-    kind: "missing",
-    summary: "LOLDrivers-vs-VDBL CSV is not in this tree. Policy shows an empty hash-gap state.",
-  },
 ];
+
+export function kindBadgeVariant(
+  kind: DetectionKind,
+): "info" | "mute" | "medium" {
+  switch (kind) {
+    case "sysmon":
+    case "sigma":
+    case "kql":
+      return "info";
+    case "markdown":
+    case "csv":
+      return "mute";
+    case "missing":
+      return "medium";
+    default: {
+      const _exhaustive: never = kind;
+      return _exhaustive;
+    }
+  }
+}
