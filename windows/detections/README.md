@@ -36,6 +36,8 @@ Filename matches against well-known LOLDrivers names are a **floor**. Production
 ## Files
 
 - `sysmon-crossview.xml` — merge into your Sysmon config
-- Sigma / KQL — download from the Rules page (`crossview-byovd-sigma.yml`, `crossview-byovd.kql`)
-- `loldrivers-gap.csv` — LOLDrivers samples not hash-blocked by this week's Microsoft VDBL (also on the Policy page)
-- Deny XML — generate from the Policy → Hash feed tab (Allow All + Deny; deploy as a **second** base policy)
+- `crossview-byovd-sigma.yml` — starter Sigma (experimental). Code Integrity, 7045, DriverLoad names, PPL death, LSASS, 4616.
+- `crossview-byovd.kql` — starter Sentinel / Defender KQL for the same hunts plus a 15-minute correlation.
+- `loldrivers-gap.json` / `loldrivers-gap.csv` — curated LOLDrivers sample for the Policy page. **Not** a live Microsoft VDBL scrape. Hashes are public loldrivers.io values; coverage flags are illustrative.
+- `wdac-checklist.md` — allow-known-good lab order
+- Deny XML — generate later from a real weekly gap feed (Allow All + Deny; deploy as a **second** base policy). This tree does not ship a generated CIP.

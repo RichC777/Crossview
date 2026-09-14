@@ -1,0 +1,174 @@
+title: CROSSVIEW - Code Integrity blocked or audited a driver
+id: a1f3c8e0-2b4d-4e9a-9c71-6d8f0a1b2c3d
+status: experimental
+description: |
+  Starter hunt for Windows Code Integrity 3077 (block) and 3076 (audit).
+  VDBL, WDAC, or HVCI refused a kernel image — or would have in audit mode.
+  Lab pack only. Tune before production.
+references:
+  - https://github.com/RichC777/Crossview
+author: CROSSVIEW
+date: 2026/09/14
+logsource:
+  product: windows
+  service: codeintegrity
+detection:
+  selection:
+    EventID:
+      - 3076
+      - 3077
+  condition: selection
+falsepositives:
+  - First-run WDAC audit on a new hardware role
+  - Unsigned lab drivers under testsigning
+level: high
+tags:
+  - attack.defense-evasion
+  - attack.t1068
+---
+title: CROSSVIEW - Kernel driver service from a user-writable path
+id: b2e4d9f1-3c5e-4f0b-8d82-7e9a1b2c3d4e
+status: experimental
+description: |
+  Starter hunt for System 7045 / Security 4697 when ImagePath is under
+  Users, Temp, AppData, or Downloads. OEM loads from System32\drivers
+  and DriverStore are usually noise — filter those in the SIEM.
+author: CROSSVIEW
+date: 2026/09/14
+logsource:
+  product: windows
+  service: system
+detection:
+  service_installed:
+    EventID: 7045
+  user_writable:
+    ImagePath|contains:
+      - '\Users\'
+      - '\Temp\'
+      - '\AppData\'
+      - '\Downloads\'
+  condition: service_installed and user_writable
+falsepositives:
+  - Vendor updaters that stage a .sys in Temp then copy it to DriverStore
+level: high
+tags:
+  - attack.persistence
+  - attack.t1543.003
+---
+title: CROSSVIEW - Sysmon DriverLoad of well-known LOLDrivers names
+id: c3f5e0a2-4d6f-401c-9e93-8f0b2c3d4e5f
+status: experimental
+description: |
+  Filename floor for Sysmon Event 6. Do not add Signed=true as an exclude.
+  Classic BYOVD is a validly signed .sys. Production should hash-match
+  loldrivers.io, not only these names. Merge sysmon-crossview.xml first.
+author: CROSSVIEW
+date: 2026/09/14
+logsource:
+  product: windows
+  category: driver_load
+detection:
+  selection:
+    ImageLoaded|endswith:
+      - '\gdrv.sys'
+      - '\RTCore64.sys'
+      - '\RTCore32.sys'
+      - '\dbutil_2_3.sys'
+      - '\dbutil.sys'
+      - '\AsrDrv103.sys'
+      - '\WinRing0.sys'
+      - '\WinRing0x64.sys'
+      - '\iqvw64e.sys'
+      - '\AsIO.sys'
+      - '\GLCKIO2.sys'
+      - '\MsIo64.sys'
+  condition: selection
+falsepositives:
+  - Rare leftover OEM utilities that still ship these filenames
+level: high
+tags:
+  - attack.privilege-escalation
+  - attack.t1068
+---
+title: CROSSVIEW - PPL or EDR process died
+id: d4a6f1b3-5e70-412d-af04-901c3d4e5f60
+status: experimental
+description: |
+  Sysmon ProcessTerminate (5) for common PPL / EDR / Sysmon images.
+  Kernel code can kill these without a user-mode parent. Correlate with
+  a DriverLoad in the same 15–30 minutes. Patch Tuesday installer noise
+  is the main false positive.
+author: CROSSVIEW
+date: 2026/09/14
+logsource:
+  product: windows
+  category: process_termination
+detection:
+  selection:
+    Image|endswith:
+      - '\MsMpEng.exe'
+      - '\MsSense.exe'
+      - '\SenseIR.exe'
+      - '\NisSrv.exe'
+      - '\CSFalconService.exe'
+      - '\CSFalconContainer.exe'
+      - '\SentinelAgent.exe'
+      - '\SentinelServiceHost.exe'
+      - '\elastic-agent.exe'
+      - '\elastic-endpoint.exe'
+      - '\CylanceSvc.exe'
+      - '\Sysmon64.exe'
+      - '\Sysmon.exe'
+  condition: selection
+falsepositives:
+  - Cumulative updates and EDR self-upgrade in the same window
+level: high
+tags:
+  - attack.defense-evasion
+  - attack.t1562.001
+---
+title: CROSSVIEW - LSASS process access
+id: e5b7a2c4-6f81-423e-b015-a12d4e5f6071
+status: experimental
+description: |
+  Sysmon ProcessAccess (10) targeting lsass.exe. Filter known EDR in the
+  SIEM, not in the Sysmon fragment. This rule is a starter; it is noisy
+  on endpoints that already collect Event 10 broadly.
+author: CROSSVIEW
+date: 2026/09/14
+logsource:
+  product: windows
+  category: process_access
+detection:
+  selection:
+    TargetImage|endswith: '\lsass.exe'
+  condition: selection
+falsepositives:
+  - Security products and OS components that open LSASS by design
+level: medium
+tags:
+  - attack.credential-access
+  - attack.t1003.001
+---
+title: CROSSVIEW - Clock tamper used to retrosign a driver
+id: f6c8b3d5-7092-434f-c126-b23e5f607182
+status: experimental
+description: |
+  Security 4616 (time change) plus process-create of w32tm / Set-Date.
+  LOCAL SERVICE NTP slews of a few seconds are noise. Alert on day or
+  year deltas, then look for a DriverLoad in the next 15–30 minutes.
+author: CROSSVIEW
+date: 2026/09/14
+logsource:
+  product: windows
+  service: security
+detection:
+  time_changed:
+    EventID: 4616
+  condition: time_changed
+falsepositives:
+  - Domain NTP and LOCAL SERVICE w32time adjustments
+level: medium
+tags:
+  - attack.defense-evasion
+  - attack.t1070.006

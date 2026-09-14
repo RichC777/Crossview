@@ -60,7 +60,7 @@ FudModule 3.1 is **data-only**. A clean SSDT/hook scan plus dead ETW and empty E
 
 Sigma + KQL for the BYOVD *approach* to the kernel: Code Integrity 3076/3077, SCM 7045 from user-writable paths, Sysmon 6 (signed drivers included), PPL/EDR death, 4616/w32time clock tamper, and 15-minute correlations. Merge `sysmon-crossview.xml` into Sysmon — do not exclude `Signed=true` on DriverLoad.
 
-Download YAML/KQL from the lab console Rules page.
+Starter YAML/KQL/CSV live in `detections/` and on the lab console Rules page. The LOLDrivers gap JSON/CSV is a curated sample, not a live VDBL scrape.
 
 ## Safety
 

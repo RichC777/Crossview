@@ -40,16 +40,16 @@ Serves the shell at `http://localhost:8080`. Production bundle: `npm run build` 
 - `/` scanner fixture (docs only)
 - `/matrix` technique matrix
 - `/campaign` FudModule 3.1 notes
-- `/detections` in-repo `windows/detections/` files (Sysmon + markdown). Honest empty state for Sigma/KQL
-- `/policy` WDAC checklist. LOLDrivers hash gap is empty until `loldrivers-gap.json` exists
+- `/detections` in-repo `windows/detections/` files (Sysmon, starter Sigma/KQL, curated LOLDrivers CSV, markdown)
+- `/policy` WDAC checklist plus curated LOLDrivers hash-gap sample (empty state remains if the JSON has no rows)
 - `/package` driver/CLI/GUI build notes
 - `/cli` `cvscan.exe` flags
 
 ## Detections pack
 
-`windows/detections/` — Sysmon fragment and WDAC checklist are in-tree. Sigma, KQL, and the LOLDrivers-vs-VDBL CSV are not checked in yet (the Rules/Policy pages say so).
+`windows/detections/` — Sysmon fragment, starter Sigma, starter KQL, curated LOLDrivers-vs-VDBL JSON/CSV, WDAC checklist. The gap feed uses public loldrivers.io hashes; VDBL coverage flags are illustrative, not a weekly Microsoft scrape.
 
-Deny overlay XML is generated from the Policy → Hash feed tab. Deploy it as a **second** App Control base policy (Allow All + Deny hashes), never as the only policy.
+Deny overlay XML is not generated in this tree. When you build one from a real weekly feed, deploy it as a **second** App Control base policy (Allow All + Deny hashes), never as the only policy.
 
 ## License / use
 
