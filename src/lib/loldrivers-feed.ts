@@ -1,5 +1,3 @@
-import raw from "./data/loldrivers-gap.json";
-
 export type GapRow = {
   n: string;
   v: string;
@@ -12,6 +10,8 @@ export type GapRow = {
 };
 
 export type GapFeed = {
+  available: boolean;
+  reason?: string;
   lolAsOf: string;
   vdblVersion: string;
   vdblPolicyId: string;
@@ -31,7 +31,30 @@ export type GapFeed = {
   rows: GapRow[];
 };
 
-export const FEED = raw as GapFeed;
+const EMPTY_STATS: GapFeed["stats"] = {
+  drivers: 0,
+  samples: 0,
+  hashCovered: 0,
+  nameOnly: 0,
+  gap: 0,
+  hvciOk: 0,
+  malicious: 0,
+  actionable: 0,
+  vdblHashTokens: 0,
+  vdblNames: 0,
+};
+
+export const FEED: GapFeed = {
+  available: false,
+  reason:
+    "src/lib/data/loldrivers-gap.json is not in this tree. The Policy page stays empty until a LOLDrivers-vs-VDBL feed is generated.",
+  lolAsOf: "",
+  vdblVersion: "",
+  vdblPolicyId: "",
+  generated: "",
+  stats: EMPTY_STATS,
+  rows: [],
+};
 
 export function coveragePct(s = FEED.stats): number {
   if (!s.samples) return 0;
